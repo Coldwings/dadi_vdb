@@ -267,26 +267,6 @@ static size_t file_read(struct file *file, void *buf, size_t count, loff_t *pos)
     return ret;
 }  
 
-
-static size_t get_file_size(const char* path) {
-   struct kstat *stat;
-   size_t size;
-   mm_segment_t fs;
-
-   fs = get_fs();
-        set_fs(KERNEL_DS);
-        
-        stat =(struct kstat *) kmalloc(sizeof(struct kstat), GFP_KERNEL);
-        if (!stat)
-                return ERR_PTR(-ENOMEM);
-
-        vfs_stat(path, stat);
-        size = stat->size;
-   set_fs(fs);
-   kfree(stat);
-   return size;
-}
-
 /*
  * Process a single bvec of a bio.
  */
@@ -296,15 +276,27 @@ static int ovbd_do_bvec(struct ovbd_device *ovbd, struct page *page,
 {
 	void *mem;
 	int err = 0;
+	ssize_t ret = 0;
+	loff_t loff = sector;
 
 	if (op_is_write(op)) {
+		err = -ENOTSUPP;
 		goto out;
 	}
-    pr_info("vbd: dobvec %lu %lu %lu %lx\n", off, len, sector, ovbd->compressed_fp);
-	mem = kmap_atomic(page);
+    mem = kmap_atomic(page);
+	// 不从page缓存加载，替换了copy_from_ovbd
 	// copy_from_ovbd(mem + off, ovbd, sector, len);
-	loff_t loff = off;
-	kernel_read(ovbd->compressed_fp, mem + off, len, &loff);
+	loff = loff << SECTOR_SHIFT;
+	loff = loff & ~((loff_t)PAGE_SIZE - (loff_t)1);
+	// loff指文件上（block上的逻辑的）offset
+	// 必定对齐PAGS_SIZE，一次读取一个PAGE
+	ret = kernel_read(ovbd->compressed_fp, mem, PAGE_SIZE, &loff);
+	pr_info("vbd: dobvec %ld %lu %d %lu %ld %lx %x\n", loff, sector, off, len, ret, ovbd->compressed_fp, op);
+	if (ret < 0) {
+		kunmap_atomic(mem);
+		err = -EIO;
+		goto out;
+	}
 	flush_dcache_page(page);
 	kunmap_atomic(mem);
 
@@ -393,7 +385,9 @@ MODULE_ALIAS("rd");
 static LIST_HEAD(ovbd_devices);
 static DEFINE_MUTEX(ovbd_devices_mutex);
 
-static struct ovbd_device *ovbd_alloc(int i)
+// 直接拿file对象来处理了
+//比较偷懒的做法
+static struct ovbd_device *ovbd_alloc(int i, struct file* fp)
 {
 	struct ovbd_device *ovbd;
 	struct gendisk *disk;
@@ -426,12 +420,13 @@ static struct ovbd_device *ovbd_alloc(int i)
 	disk->flags		= GENHD_FL_EXT_DEVT;
 	sprintf(disk->disk_name, "vbd%d", i);
 	pr_info("vbd: disk->disk_name %s\n", disk->disk_name);
-	if (ovbd->compressed_fp == NULL) {
-		ovbd->compressed_fp = file_open(backfile, O_RDONLY, 0644);
-		ovbd->block_size = get_file_size(backfile) / SECTOR_SIZE;
-		ovbd->initialized = true;
-	}
-	set_capacity(disk, ovbd->block_size / SECTOR_SIZE);
+	ovbd->compressed_fp = fp;
+	// 此处为loop形式，文件长度即blockdev的大小
+	// 如果是LSMTFile，则应以LSMTFile头记录的长度为准
+	ovbd->block_size = fp->f_inode->i_size >> SECTOR_SHIFT;
+	ovbd->initialized = true;
+	pr_info("bs=%d fs=%d\n", ovbd->block_size, fp->f_inode->i_size);
+	set_capacity(disk, fp->f_inode->i_size >> SECTOR_SHIFT);
 	ovbd->ovbd_queue->backing_dev_info->capabilities |= BDI_CAP_SYNCHRONOUS_IO;
 
 	/* Tell the block layer that this is not a rotational device */
@@ -468,16 +463,16 @@ static struct ovbd_device *ovbd_init_one(int i, bool *new)
 			goto out;
 	}
 
-	ovbd = ovbd_alloc(i);
-	if (ovbd) {
-		ovbd->ovbd_disk->queue = ovbd->ovbd_queue;
-		pr_info("add_disk\n");
-		add_disk(ovbd->ovbd_disk);
-	        // open_zfile(ovbd, backfile, true);
-		ovbd->initialized = true;	
-		list_add_tail(&ovbd->ovbd_list, &ovbd_devices);
-	}
-	*new = true;
+	// ovbd = ovbd_alloc(i);
+	// if (ovbd) {
+	// 	ovbd->ovbd_disk->queue = ovbd->ovbd_queue;
+	// 	pr_info("add_disk\n");
+	// 	add_disk(ovbd->ovbd_disk);
+	//         // open_zfile(ovbd, backfile, true);
+	// 	ovbd->initialized = true;	
+	// 	list_add_tail(&ovbd->ovbd_list, &ovbd_devices);
+	// }
+	// *new = true;
 out:
 	return ovbd;
 }
@@ -538,14 +533,6 @@ static int __init ovbd_init(void)
 
 	ovbd_check_and_reset_par();
 
-	pr_info("alloc");
-	for (i = 0; i < 1; i++) {
-		ovbd = ovbd_alloc(i);
-		if (!ovbd)
-			goto out_free;
-		list_add_tail(&ovbd->ovbd_list, &ovbd_devices);
-	}
-
 	pr_info("vbd: before open file\n");
 	struct file* fp = file_open( backfile, 0, 644);
 	if (!fp) {
@@ -554,6 +541,19 @@ static int __init ovbd_init(void)
 	}
 	pr_info("vbd: after open file\n");
 
+	// 先打开文件再创建设备
+	pr_info("alloc");
+	for (i = 0; i < 1; i++) {
+		ovbd = ovbd_alloc(i, fp);
+		if (!ovbd)
+			goto out_free;
+		ovbd->block_size = fp->f_inode->i_size / SECTOR_SIZE;
+		pr_info("vbd: get filesize %d\n", ovbd->block_size);
+		ovbd->compressed_fp = fp;
+		pr_info("vbd: set fp\n");
+		list_add_tail(&ovbd->ovbd_list, &ovbd_devices);
+	}
+
 	/* point of no return */
 
 	list_for_each_entry(ovbd, &ovbd_devices, ovbd_list) {
@@ -561,8 +561,8 @@ static int __init ovbd_init(void)
 		 * associate with queue just before adding disk for
 		 * avoiding to mess up failure path
 		 */
-		ovbd->block_size = get_file_size(backfile) / SECTOR_SIZE;
-		pr_info("vbd: get filesize\n");
+		ovbd->block_size = fp->f_inode->i_size / SECTOR_SIZE;
+		pr_info("vbd: get filesize %d\n", ovbd->block_size);
 		ovbd->compressed_fp = fp;
 		pr_info("vbd: set fp\n");
 		ovbd->ovbd_disk->queue = ovbd->ovbd_queue;
