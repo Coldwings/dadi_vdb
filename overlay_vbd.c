@@ -239,6 +239,54 @@ static void copy_from_ovbd(void *dst, struct ovbd_device *ovbd,
 	} 
 }
 
+static struct file *file_open(const char *path, int flags, int rights) 
+{
+    struct file *filp = NULL;
+    int err = 0;
+
+    filp = filp_open(path, flags, rights);
+    if (IS_ERR(filp)) {
+        err = PTR_ERR(filp);
+        return NULL;
+    }
+    return filp;
+
+}
+
+static void file_close(struct file *file)
+{
+    filp_close(file, NULL);
+}
+
+static size_t file_read(struct file *file, void *buf, size_t count, loff_t *pos)  
+{
+    unsigned int ret = kernel_read(file, buf, count, pos);
+    // if (!ret) {
+    //    pr_info("reading data failed at %d", pos);
+    // }
+    return ret;
+}  
+
+
+static size_t get_file_size(const char* path) {
+   struct kstat *stat;
+   size_t size;
+   mm_segment_t fs;
+
+   fs = get_fs();
+        set_fs(KERNEL_DS);
+        
+        stat =(struct kstat *) kmalloc(sizeof(struct kstat), GFP_KERNEL);
+        if (!stat)
+                return ERR_PTR(-ENOMEM);
+
+        vfs_stat(path, stat);
+        size = stat->size;
+   set_fs(fs);
+   kfree(stat);
+   return size;
+}
+
 /*
  * Process a single bvec of a bio.
  */
@@ -252,9 +300,11 @@ static int ovbd_do_bvec(struct ovbd_device *ovbd, struct page *page,
 	if (op_is_write(op)) {
 		goto out;
 	}
-
+    pr_info("vbd: dobvec %lu %lu %lu %lx\n", off, len, sector, ovbd->compressed_fp);
 	mem = kmap_atomic(page);
-	copy_from_ovbd(mem + off, ovbd, sector, len);
+	// copy_from_ovbd(mem + off, ovbd, sector, len);
+	loff_t loff = off;
+	kernel_read(ovbd->compressed_fp, mem + off, len, &loff);
 	flush_dcache_page(page);
 	kunmap_atomic(mem);
 
@@ -375,7 +425,13 @@ static struct ovbd_device *ovbd_alloc(int i)
 	disk->private_data	= ovbd;
 	disk->flags		= GENHD_FL_EXT_DEVT;
 	sprintf(disk->disk_name, "vbd%d", i);
-	set_capacity(disk, rd_size * 2);
+	pr_info("vbd: disk->disk_name %s\n", disk->disk_name);
+	if (ovbd->compressed_fp == NULL) {
+		ovbd->compressed_fp = file_open(backfile, O_RDONLY, 0644);
+		ovbd->block_size = get_file_size(backfile) / SECTOR_SIZE;
+		ovbd->initialized = true;
+	}
+	set_capacity(disk, ovbd->block_size / SECTOR_SIZE);
 	ovbd->ovbd_queue->backing_dev_info->capabilities |= BDI_CAP_SYNCHRONOUS_IO;
 
 	/* Tell the block layer that this is not a rotational device */
@@ -396,6 +452,8 @@ static void ovbd_free(struct ovbd_device *ovbd)
 {
 	put_disk(ovbd->ovbd_disk);
 	blk_cleanup_queue(ovbd->ovbd_queue);
+	if (ovbd->compressed_fp)
+		file_close(ovbd->compressed_fp);
 	ovbd_free_pages(ovbd);
 	kfree(ovbd);
 }
@@ -413,9 +471,10 @@ static struct ovbd_device *ovbd_init_one(int i, bool *new)
 	ovbd = ovbd_alloc(i);
 	if (ovbd) {
 		ovbd->ovbd_disk->queue = ovbd->ovbd_queue;
+		pr_info("add_disk\n");
 		add_disk(ovbd->ovbd_disk);
-		printk("ovbd_init_one ");
-	        open_zfile(ovbd, backfile, true);
+	        // open_zfile(ovbd, backfile, true);
+		ovbd->initialized = true;	
 		list_add_tail(&ovbd->ovbd_list, &ovbd_devices);
 	}
 	*new = true;
@@ -472,17 +531,28 @@ static int __init ovbd_init(void)
 	struct ovbd_device *ovbd, *next;
 	int i;
 
+	pr_info("INIT\n");
+
 	if (register_blkdev(OVBD_MAJOR, "ovbd"))
 		return -EIO;
 
 	ovbd_check_and_reset_par();
 
-	for (i = 0; i < rd_nr; i++) {
+	pr_info("alloc");
+	for (i = 0; i < 1; i++) {
 		ovbd = ovbd_alloc(i);
 		if (!ovbd)
 			goto out_free;
 		list_add_tail(&ovbd->ovbd_list, &ovbd_devices);
 	}
+
+	pr_info("vbd: before open file\n");
+	struct file* fp = file_open( backfile, 0, 644);
+	if (!fp) {
+		pr_info("Canot open zfile\n");
+		return -ENOENT;
+	}
+	pr_info("vbd: after open file\n");
 
 	/* point of no return */
 
@@ -491,17 +561,23 @@ static int __init ovbd_init(void)
 		 * associate with queue just before adding disk for
 		 * avoiding to mess up failure path
 		 */
+		ovbd->block_size = get_file_size(backfile) / SECTOR_SIZE;
+		pr_info("vbd: get filesize\n");
+		ovbd->compressed_fp = fp;
+		pr_info("vbd: set fp\n");
 		ovbd->ovbd_disk->queue = ovbd->ovbd_queue;
+		ovbd->initialized = true;
+		pr_info("add_disk\n");
 		add_disk(ovbd->ovbd_disk);
 	}
-
+	pr_info("Register blk\n");
 	blk_register_region(MKDEV(OVBD_MAJOR, 0), 1UL << MINORBITS,
 				  THIS_MODULE, ovbd_probe, NULL, NULL);
 
 	pr_info("ovbd: module loaded\n");
 	
 	struct ovbd_device* backed_ovbd = list_first_entry_or_null(&ovbd->ovbd_list, struct ovbd_device, ovbd_list);
-        open_zfile(backed_ovbd, backfile, true);
+	// open_zfile(backed_ovbd, backfile, true);
 
 	return 0;
 
