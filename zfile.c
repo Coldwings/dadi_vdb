@@ -1,278 +1,194 @@
-#include <linux/fs.h>
 #include <asm/segment.h>
+#include <linux/fs.h>
 //#include <asm/uaccess.h>
 #include <linux/buffer_head.h>
-#include <linux/slab.h>
+#include <linux/vmalloc.h>
 #include <linux/lz4.h>
+#include <linux/slab.h>
+
 #include "overlay_vbd.h"
 
-struct file *file_open(const char *path, int flags, int rights) 
-{
+struct file *file_open(const char *path, int flags, int rights) {
     struct file *fp = NULL;
     fp = filp_open(path, O_RDONLY, 0);
     if (IS_ERR(fp)) {
-         printk("Cannot open the file %ld\n", PTR_ERR(fp));
-         return NULL;
+        printk("Cannot open the file %ld\n", PTR_ERR(fp));
+        return NULL;
     }
     printk("Opened the file %s", path);
     return fp;
 }
 
-void file_close(struct file *file)
-{
-    filp_close(file, NULL);
-}
+void file_close(struct file *file) { filp_close(file, NULL); }
 
-size_t file_read(struct file *file, void *buf, size_t count, loff_t *pos)  
-{
-    unsigned int ret = kernel_read(file, buf, count, pos);
+size_t file_read(struct file *file, void *buf, size_t count, loff_t pos) {
+    unsigned int ret = kernel_read(file, buf, count, &pos);
     if (!ret) {
-       printk("reading data failed at %d", pos);
+        printk("reading data failed at %d", pos);
     }
     return ret;
-}  
-
-
-size_t get_file_size(const char* path) {
-   struct kstat *stat;
-   size_t size;
-   mm_segment_t fs;
-
-   fs = get_fs();
-        set_fs(KERNEL_DS);
-        
-        stat =(struct kstat *) kmalloc(sizeof(struct kstat), GFP_KERNEL);
-        if (!stat)
-                return ERR_PTR(-ENOMEM);
-
-        vfs_stat(path, stat);
-        size = stat->size;
-   return size;
-   set_fs(fs);
-   kfree(stat);
 }
 
-size_t get_range ( struct ovbd_device *odev, size_t idx) {
+size_t file_len(struct file *file) { return file ? file->f_inode->i_size : 0; }
 
-         // return BASE  + idx % (page_size) * local_minimum + sum(delta - local_minimum)
-     off_t part_idx = idx / DEFAULT_PART_SIZE;
-     off_t inner_idx = idx & (DEFAULT_PART_SIZE - 1);
-     uint16_t local_min = odev->partial_offset[part_idx] & ((1 << DEFAULT_LSHIFT) - 1);
-     uint64_t part_offset = odev->partial_offset[part_idx] >> DEFAULT_LSHIFT;
-     off_t ret = part_offset + odev->deltas[idx] + (inner_idx)*local_min;
-     printk("get_range : %d , %d", idx, ret);
-     return ret;
+size_t zfile_len(struct zfile *zfile) { return zfile->header.vsize; }
 
+ssize_t zfile_read(struct zfile *zf, void *dst, size_t count, loff_t offset) {
+    size_t start_idx, end_idx;
+    loff_t begin, range, filloff;
+    size_t bs;
+    ssize_t ret;
+    int dc, i;
+    pr_info("zfile: read off=%ld cnt=%lu\n", offset, count);
+    if (!zf) return -EIO;
+    bs = zf->header.opt.block_size;
+    // read empty
+    if (count == 0) return 0;
+    // read from over-tail
+    if (offset > zf->header.vsize) {
+        pr_info("zfile: read over tail %ld > %ld\n", offset, zf->header.vsize);
+        return 0;
+    }
+    // read till tail
+    if (offset + count > zf->header.vsize) {
+        count = zf->header.vsize - offset;
+    }
+    start_idx = offset / bs;
+    end_idx = (offset + count - 1) / bs;
+
+    begin = zf->jump[start_idx].partial_offset;
+    range = zf->jump[end_idx].partial_offset + zf->jump[end_idx].delta - begin;
+
+    unsigned char *src_buf;
+    src_buf = kmalloc(range, GFP_KERNEL);
+    unsigned char *decomp_buf;
+    decomp_buf = kmalloc(4096, GFP_KERNEL);
+
+    // read compressed data
+    ret = file_read(zf->fp, src_buf, range, begin);
+    if (ret != range) {
+        pr_info("zfile: Read file failed, %d != %d\n", ret, range);
+        ret = -EIO;
+        goto fail_read;
+    }
+
+    unsigned char *c_buf = src_buf;
+
+    // decompress in seq
+    loff_t decomp_offset = offset - offset % bs;
+    ret = 0;
+    for (i = start_idx; i <= end_idx; i++) {
+        dc = LZ4_decompress_safe(
+            c_buf, decomp_buf,
+            zf->jump[i].delta - (zf->header.opt.verify ? sizeof(uint32_t) : 0),
+            bs);
+        if (dc < bs && decomp_offset + dc < zf->header.vsize) {
+            pr_info("Failed to read\n");
+            goto fail_read;
+        }
+        loff_t poff = offset - decomp_offset;
+        size_t pcnt = count > (dc - poff) ? (dc - poff) : count;
+        pr_info("zfile: decompress %d block, offset=%ld decomp_offset=%ld cut poff=%ld pcnt=%lu\n", i, offset, decomp_offset, poff, pcnt);
+        memcpy(dst, decomp_buf + poff, pcnt);
+        decomp_offset += dc;
+        dst += pcnt;
+        ret += pcnt;
+        count -= pcnt;
+        offset = decomp_offset;
+        c_buf += zf->jump[i].delta;
+    }
+
+fail_read:
+    kfree(decomp_buf);
+    kfree(src_buf);
+
+    return ret;
 }
 
-int get_blocks_length( struct ovbd_device* odev, size_t begin, size_t end) {
-    printk("begin: %d, end %d", begin, end);
-    return (get_range( odev, end) - get_range(odev, begin));
+void build_jump_table(uint32_t *jt_saved, struct zfile *zf) {
+    size_t i;
+
+    zf->jump = vmalloc((zf->header.index_size + 2) * sizeof(struct jump_table));
+    zf->jump[0].partial_offset = ZF_SPACE;
+    for (i = 0; i < zf->header.index_size; i++) {
+        zf->jump[i].delta = jt_saved[i];
+        zf->jump[i + 1].partial_offset =
+            zf->jump[i].partial_offset + jt_saved[i];
+    }
 }
 
-bool decompress_to( struct ovbd_device *odev, void* dst, loff_t start, loff_t length,  loff_t *dlen) {
-   printk ("get decrompess length [%d - %d]", start, start + length );
-   size_t start_idx; 
-   loff_t begin, range;
-   start_idx = start / HT_SPACE ;
-   if ( start_idx >= 1 && odev->jump_table[start_idx] != 0 && start_idx < odev->jt_size ) {
-	begin = odev->jump_table[start_idx];
-	range = odev->jump_table[start_idx + 1] - odev->jump_table[start_idx];
-   } else {
-//   range = get_range(odev, start);
-
-   	begin = start + ZF_SPACE;
-	range = odev->jump_table[start_idx + 1] - odev->jump_table[start_idx];
-   }
-
-   printk("now we get begin %u, range %u", start, range);
-
-   if (odev->path == NULL) {
-	   printk("device not initiated yet");
-	   return false;
-   } else {
-	   printk("Using file (%s) as backend", odev->path);
-   }
-
-   unsigned char *src_buf; 
-   src_buf = kmalloc(range,  GFP_KERNEL);
-   memset(src_buf, 0, range);
-
-   struct file* fp = file_open( odev->path, 0, 644);
-   if (!fp) {
-	   printk("Canot open zfile %s\n", odev->path);
-	   return false;
-   }
-  
-   printk("src_buf length %d, begin %d", range, begin);
-   
-   size_t ret = file_read(fp, src_buf, range, &begin);
-   if (ret !=  range ) {
-	   printk( "Did read enough data, something may be wrong %d", ret);
-	   return false;
-   }
-   printk("loaded %d src data at offset [%d - %d]", ret, start, start + range); 
-   /*
-   int i = 0;
-   for (i = 0; i< 128; i+=4) {
-	printk("src_buf[%u]=%u", i, *((uint32_t*)(src_buf+i)));
-   }
-   */
-   ret = LZ4_decompress_safe(src_buf, (unsigned char *)dst, range - 4, *dlen);
-   *dlen = ret;
-   printk("Decompressed [%d]", *dlen);
-
-   kfree(src_buf);
-   
-   return true;
+void zfile_close(struct zfile *zfile) {
+    pr_info("zfile: close %lx\n", zfile);
+    if (zfile) {
+        if (zfile->jump) {
+            vfree(zfile->jump);
+            zfile->jump = NULL;
+        }
+        if (zfile->fp) {
+            file_close(zfile->fp);
+            zfile->fp = NULL;
+        }
+        kfree(zfile);
+    }
 }
 
-bool test_decompress(struct ovbd_device* odev, size_t partial_size, size_t deltas_size) {
-  size_t i, j;
-  loff_t start_offset, stop_offset;
-  printk ( "begining decompress");
-  for (i = 0; i< partial_size; i ++) {
-	  for (j =0 ; j< deltas_size; j++) {
-                  if (j == 0) {
-                          start_offset = 0;
-                  } else {
-                          start_offset = get_range(odev, j-1 );
-                  }
-                  stop_offset = get_range(odev, j);
-	   printk(" get test range [%d -  %d]", start_offset, stop_offset);
-	   size_t src_blk_size = odev->block_size;
-	   unsigned char *src_buf;
-	   unsigned char *dst_buf;
+struct zfile *zfile_open(const char *path) {
+    unsigned int i;
+    uint32_t *jt_saved;
+    size_t jt_size = 0;
+    struct zfile *zfile = NULL;
+    loff_t pos = 0;
+    int ret = 0;
 
-	   src_buf = kmalloc(stop_offset - start_offset, GFP_KERNEL);
-	   dst_buf = kmalloc(MAX_READ_SIZE, GFP_KERNEL);
-           struct file* fp = file_open( "/test.c", 0, 644);
-           size_t ret = file_read(fp, src_buf, stop_offset - start_offset, &start_offset);
-	   printk("loaded %d src data at offset [%d]", ret, &start_offset);
+    zfile = kzalloc(sizeof(struct zfile), GFP_KERNEL);
+    if (!zfile) {
+        goto fail_alloc;
+    }
 
-	   LZ4_decompress_safe(src_buf, (unsigned char *)dst_buf, odev->block_size, MAX_READ_SIZE);
-	   printk("Decompressed [%s]", dst_buf);
+    zfile->fp = file_open(path, 0, 644);
+    if (!zfile->fp) {
+        printk("Canot open zfile %s\n", path);
+        goto fail_open;
+    }
 
-	   kfree(src_buf);
-	   kfree(dst_buf);
-	}
-  }
-  return true;
+    ret = file_read(zfile->fp, &zfile->header, sizeof(struct zfile_ht), 0);
+
+    if (ret < (ssize_t)sizeof(struct zfile_ht)) {
+        printk("failed to load header %d \n", ret);
+        goto fail_open;
+    }
+
+    // should verify header
+
+    size_t file_size = file_len(zfile->fp);
+    loff_t tailer_offset = file_size - ZF_SPACE;
+    ret = file_read(zfile->fp, &zfile->header, ZF_SPACE, tailer_offset);
+
+    pr_info("Header vsize=%ld index_offset=%ld index_size=%ld verify=%d\n",
+            zfile->header.vsize, zfile->header.index_offset,
+            zfile->header.index_size, zfile->header.opt.verify);
+
+    pr_info("zfile: vlen=%ld size=%ld\n", zfile->header.vsize,
+            zfile_len(zfile));
+
+    jt_size = ((uint64_t)zfile->header.index_size) * sizeof(uint32_t);
+    printk("get index_size %d, index_offset %d", jt_size,
+           zfile->header.index_offset);
+
+    jt_saved = vmalloc(jt_size);
+
+    loff_t index_offset = zfile->header.index_offset;
+    ret = file_read(zfile->fp, jt_saved, jt_size, index_offset);
+    for (i = 0; i < 4; i++) printk("jt_saved[%d] = %d", i, jt_saved[i]);
+
+    build_jump_table(jt_saved, zfile);
+
+    vfree(jt_saved);
+
+    return zfile;
+
+fail_open:
+    zfile_close(zfile);
+fail_alloc:
+    return NULL;
 }
-
-bool build_jump_table(struct ovbd_device* odev, uint32_t *jt_saved, struct zfile_ht* pht) {
-  size_t i;
-  int part_size = DEFAULT_PART_SIZE;
-  off_t offset_begin = pht->opt.dict_size + ZF_SPACE;
-  size_t n = pht->index_size ;
-  uint16_t local_min;
-  off_t raw_offset = offset_begin;
-  uint16_t lshift = DEFAULT_LSHIFT;
-  uint16_t last_delta;
-//  printk("offset_begin %d", offset_begin);
-  
-  local_min = 0;
-  odev->partial_offset[0] = (raw_offset << lshift) + local_min;
-  odev->deltas[0] = 0;
- // printk("partial_offset %d", odev->partial_offset[0]);
-
-  uint16_t partial_size = 1;
-  uint16_t deltas_size = 1;
-  odev->jump_table[0] = 0;
-  odev->jt_size = 1;
-
-    for (i = 1; i < (size_t) n + 1 ; ++i) {
- //         printk(" jump_table[%u]:  %u", i, (uint32_t) (jt_saved[i-1]));
-          odev->jump_table[i] = odev->jump_table[i-1] + jt_saved[i - 1];
-	  odev->jt_size++;
-//	  printk("Load jump_table ...  [%d, %d]", odev->jump_table[i-1], odev->jump_table[i]);
-
-          last_delta = 0;
-          if (( i % part_size) == 0 ) {
-                  local_min = 1<<16 - 1;
-                  printk(" local_min  %d", local_min);
-		  size_t j ;
-                  for (j = i; j < min( (size_t)(n + 1), (size_t)(i + part_size) ); j ++ )
-                          local_min = min( (uint16_t)jt_saved[j - 1], (uint16_t)local_min);
-                  odev->partial_offset[i % part_size]  = (raw_offset << lshift) + local_min;
-                  partial_size++;
-                  odev->deltas[deltas_size++] = 0;
-                  last_delta = 0;
-
-                  continue;
-          }
-          odev->deltas[deltas_size++] = odev->deltas[i-1] + jt_saved[i-1] - local_min;
-          last_delta = last_delta + odev->deltas[i-1] - local_min;
-
-  }
-  
-  //test_decompress(odev, partial_size, deltas_size);
-
-  return true;
-
-}
-
-bool open_zfile(struct ovbd_device* odev , const char* path, bool ownership) {
-   unsigned int ret, i;
-   struct zfile_ht* zht;
-   unsigned char* header_tail; 
-   uint32_t* jt_saved;
-   size_t jt_size = 0;
-   loff_t pos = 0;
-   odev->initialized = false;
-
-   struct file* fp = file_open( path, 0, 644);
-   if (!fp) {
-	   printk("Canot open zfile %s\n", path);
-	   return false;
-   }
-
-   header_tail = kmalloc(HT_SPACE, GFP_KERNEL);
-   memset(header_tail, 0, HT_SPACE);
-   ret = file_read(fp, header_tail, ZF_SPACE, &pos);
-   zht = (struct zfile_ht*) header_tail;
-   
-   if ( ret < (ssize_t) ZF_SPACE) {
-	   printk("failed to load header \n");
-   } 
-
-   odev->compressed_fp = fp;
-   odev->path = kmalloc( strlen(path), GFP_KERNEL);
-   memset(odev->path, 0, strlen(path));
-   strncpy( odev->path, path, strlen(path));
-   printk("opened zfile as %d", fp);
-   
-
-   size_t file_size = get_file_size(path);
-   loff_t tailer_offset = file_size - ZF_SPACE;
-   ret = file_read(fp, header_tail, ZF_SPACE, &tailer_offset);
-   odev->block_size = zht->opt.block_size;
-
-   jt_size = ((uint64_t)zht->index_size) * sizeof(uint32_t) ;
-   printk ("get index_size %d, index_offset %d", jt_size, zht->index_offset);
-
-   jt_saved = kmalloc(jt_size, GFP_KERNEL);
-   memset(jt_saved, 0, jt_size);
-   memset(odev->partial_offset, 0, 200);
-   memset(odev->deltas, 0, (1<<16)-1);
-
-   loff_t index_offset = zht->index_offset;
-   ret = file_read(fp, jt_saved, jt_size, &index_offset);
-   for (i =0 ; i < 4; i++) 
-	   printk("jt_saved[%d] = %d", i, jt_saved[i]);
-
-   odev->jump_table = kmalloc(jt_size, GFP_KERNEL);
-   memset(odev->jump_table, 0, jt_size);
-   odev->jt_size = 0;
-
-   build_jump_table(odev, jt_saved, zht);
-
-   //load_lsmt(odev, fp, file_size, ownership);
-   
-   odev->initialized = true;
-   kfree(header_tail);
-   return true;
-}
-
-
-

@@ -9,6 +9,7 @@
 #include <linux/err.h>
 #include <linux/printk.h>
 #include <linux/uuid.h>
+#include <linux/fs.h>
 
 #define PRINT_INFO(fmt, ...)                                     \
 	do { if ((HBDEBUG)) \
@@ -42,6 +43,7 @@ const static uint32_t SPACE = 512;
 static const uint32_t FLAG_SHIFT_HEADER = 0; // 1:header     0:trailer
 static const uint32_t FLAG_SHIFT_TYPE = 1;   // 1:data file, 0:index file
 static const uint32_t FLAG_SHIFT_SEALED = 2; // 1:YES,       0:NO
+static const uint64_t INVALID_OFFSET = (1UL << 50) - 1;
 
 const static uint8_t MINI_LZO   = 0;
 const static uint8_t LZ4        = 1;
@@ -49,17 +51,16 @@ const static uint8_t ZSTD       = 2;
 const static uint32_t DEFAULT_BLOCK_SIZE = 4096;//8192;//32768;
 
 struct compress_options {
+  uint32_t block_size; //4
+  uint8_t type; //5
+  uint8_t level; //6
+  uint8_t use_dict; //7
+  uint32_t args; // 11
+  uint32_t dict_size; //15
+  uint8_t verify; //16
+};
 
-  uint32_t block_size;
-  uint8_t type;
-  uint8_t level;
-  uint8_t use_dict;
-  uint8_t args;
-  uint32_t dict_size;
-  uint32_t unknown;
-  uint8_t verify;
-  uint8_t padding[];
-} __attribute__ ((packed));
+_Static_assert(20 == sizeof(struct compress_options), "CO size not fit");
 
 struct _UUID {
   uint32_t a;
@@ -73,41 +74,31 @@ static struct _UUID MAGIC1 = {
     0x696a7574, 0x792e, 0x6679, 0x4140, {0x6c, 0x69, 0x62, 0x61, 0x62, 0x61}};
 
 struct zfile_ht {
-  uint64_t magic0;
-  uuid_t magic1;
-  // offset 24, 28
-  uint32_t size;  //= sizeof(HeaderTrailer);
-  uint32_t flags; //= 0;
-  uint64_t padding;
-  // offset 32, 40, 48
-  uint64_t index_offset; // in bytes
-  uint64_t index_size;   // 
+  uint64_t magic0; // 8
+  uuid_t magic1; // 4+2+2+2+6 = 4 + 12 = 20
 
-  uint64_t raw_data_size;
-  uint64_t reserved_0; // fix compatibility with HeaderTrailer in release_v1.0
+  // till here offset = 28
+  uint32_t size_ht;  //= sizeof(HeaderTrailer); // 32
+  uint64_t flags; //= 0;                        // 40
 
-  struct compress_options opt;
-  uint8_t pad[4];
-}  __packed; 
+  // till here offset = 40
+  uint64_t index_offset; // in bytes  48
+  uint64_t index_size;   // num of index  56  
+
+  uint64_t vsize;  // 64
+  uint64_t reserved_0; // 72
+
+  struct compress_options opt; // suppose to be 24
+}; 
+
+_Static_assert(96 == sizeof(struct zfile_ht), "Header size not fit");
+
 
 
 struct jump_table {
    uint64_t partial_offset; // 48 bits logical offset + 16 bits partial minimum
    uint16_t delta;
 };
-
-struct zfile_file {
-        struct zfile_ro_index *m_index;
-	bool is_header;
-	bool is_sealed;
-	bool is_data_file;
-	struct zfile_ht m_ht;
-	uint64_t m_vsize;
-        bool m_ownership;       
-        size_t m_files_count;
-        size_t MAX_IO_SIZE;
-        void* m_files[0];
-} __attribute__((packed));
 
 #define TYPE_SEGMENT         0
 #define TYPE_SEGMENT_MAPPING 1
@@ -127,25 +118,52 @@ struct lsmt_ht {
 } __attribute__((packed));
 
 
-struct segment {                             /* 8 bytes */
-        uint64_t offset : 50; // offset (0.5 PB if in sector)
-        uint32_t length : 14; // length (8MB if in sector)
-} /* __attribute__((packed)); */;
-
 struct segment_mapping {                             /* 8 + 8 bytes */
         uint64_t offset : 50; // offset (0.5 PB if in sector)
         uint32_t length : 14;
         uint64_t moffset : 55; // mapped offset (2^64 B if in sector)
         uint32_t zeroed : 1;   // indicating a zero-filled segment
         uint8_t tag;
-};
+}__attribute__((packed));
 
 struct lsmt_ro_index {
         const struct segment_mapping *pbegin;
         const struct segment_mapping *pend;
-        struct segment_mapping mapping[0];
+        struct segment_mapping *mapping;
 };
 
+// zfile can be treated as file with extends
+struct zfile {
+        struct file *fp;
+	struct zfile_ht header;
+        struct jump_table *jump;
+};
+
+// zfile functions
+// in `zfile`, data ready by `kernel_read` and then decompress to buffer
+// since calling `zfile_read` may not be aligned query, may have to perform
+// more-than-one page fetch, here is the place to caching non-complete used
+// compressed pages.
+//
+struct zfile* zfile_open(const char* path);
+ssize_t zfile_read(struct zfile* zfile, void* buff, size_t count, loff_t offset);
+size_t zfile_len(struct zfile *zfile);
+void zfile_close(struct zfile* zfile);
+
+
+struct lsmt_file {
+        struct zfile *fp;
+        struct lsmt_ht ht;
+        struct lsmt_ro_index index;
+};
+
+// lsmt_file functions... 
+// in `lsmt_file`, all data read by using `zfile_read`
+//
+struct lsmt_file* lsmt_open(struct zfile* zf);
+ssize_t lsmt_read(struct lsmt_file* fp, void* buff, size_t count, loff_t offset);
+size_t lsmt_len(struct lsmt_file *fp);
+void lsmt_close(struct lsmt_file *fp);
 
 /*
  * Each block ovbd device has a radix_tree ovbd_pages of pages that stores
@@ -165,25 +183,20 @@ struct ovbd_device {
 	 * Backing store of pages and lock to protect it. This is the contents
 	 * of the block device.
 	 */
-	spinlock_t		ovbd_lock;
-	struct radix_tree_root	ovbd_pages;
+	// spinlock_t		ovbd_lock;
+	// struct radix_tree_root	ovbd_pages;
 
-	uint64_t partial_offset[ 200 ];
-        uint16_t deltas[1<<16 - 1];
 	uint16_t block_size;
 
-	size_t *jump_table;
-	size_t jt_size;
-	struct file* compressed_fp;
+        // block-dev provides data by
+        // using `lsmtfile_read`
+        // assume block-dev size is `lsmtfile_len`
+	struct lsmt_file* fp;
  	unsigned char* path;
-	bool initialized ;
+	// bool initialized ;
 
 };
 
-// open a zfile layer
-bool open_zfile( struct ovbd_device *odev, const char* file,  bool ownership);
-bool decompress_to( struct ovbd_device *odev, void* dst, loff_t start, loff_t length, loff_t* len);
-bool load_lsmt( struct ovbd_device *odev, struct file* file, size_t filelen, bool ownership);
 
 /*struct file *file_open(const char *path, int flags, int rights)
 void  file_close(struct file *file)
