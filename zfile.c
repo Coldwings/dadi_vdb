@@ -25,7 +25,9 @@ static void file_close(struct file *file) { filp_close(file, NULL); }
 
 static size_t file_read(struct file *file, void *buf, size_t count,
                         loff_t pos) {
-    unsigned int ret = kernel_read(file, buf, count, &pos);
+    unsigned int ret = -4;
+    while (ret == -4)
+        ret = kernel_read(file, buf, count, &pos);
     if (!ret) {
         printk("reading data failed at %d", pos);
     }
@@ -45,7 +47,10 @@ ssize_t zfile_read(struct zfile *zf, void *dst, size_t count, loff_t offset) {
     ssize_t ret;
     int dc, i;
     pr_info("zfile: read off=%ld cnt=%lu\n", offset, count);
-    if (!zf) return -EIO;
+    if (!zf) {
+        pr_info("zfile: failed empty zf\n");
+        return -EIO;
+    }
     bs = zf->header.opt.block_size;
     // read empty
     if (count == 0) return 0;

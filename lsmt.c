@@ -205,6 +205,10 @@ ssize_t lsmt_read(struct lsmt_file *fp, void *buf, size_t count,
                         m[i].moffset * SECTOR_SIZE);
                 ssize_t dc = zfile_read(fp->fp, buf, m->length * SECTOR_SIZE,
                                         m->moffset * SECTOR_SIZE);
+                if (dc <= 0) {
+                    pr_info("LSMT: read failed ret=%ld\n", dc);
+                    goto out;
+                }
                 pr_info("LSMT: zfile read %ld bytes\n", dc);
                 offset += m[i].length * SECTOR_SIZE;
                 buf += m[i].length * SECTOR_SIZE;
@@ -221,6 +225,7 @@ ssize_t lsmt_read(struct lsmt_file *fp, void *buf, size_t count,
         ret += s.length * SECTOR_SIZE;
         buf += s.length * SECTOR_SIZE;
     }
+out:
     kfree(m);
     return ret;
 }
