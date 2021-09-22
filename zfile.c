@@ -2,13 +2,15 @@
 #include <linux/fs.h>
 //#include <asm/uaccess.h>
 #include <linux/buffer_head.h>
-#include <linux/vmalloc.h>
 #include <linux/lz4.h>
+#include <linux/mm.h>
+#include <linux/mman.h>
 #include <linux/slab.h>
+#include <linux/vmalloc.h>
 
 #include "overlay_vbd.h"
 
-struct file *file_open(const char *path, int flags, int rights) {
+static struct file *file_open(const char *path, int flags, int rights) {
     struct file *fp = NULL;
     fp = filp_open(path, O_RDONLY, 0);
     if (IS_ERR(fp)) {
@@ -19,9 +21,10 @@ struct file *file_open(const char *path, int flags, int rights) {
     return fp;
 }
 
-void file_close(struct file *file) { filp_close(file, NULL); }
+static void file_close(struct file *file) { filp_close(file, NULL); }
 
-size_t file_read(struct file *file, void *buf, size_t count, loff_t pos) {
+static size_t file_read(struct file *file, void *buf, size_t count,
+                        loff_t pos) {
     unsigned int ret = kernel_read(file, buf, count, &pos);
     if (!ret) {
         printk("reading data failed at %d", pos);
@@ -29,7 +32,27 @@ size_t file_read(struct file *file, void *buf, size_t count, loff_t pos) {
     return ret;
 }
 
-size_t file_len(struct file *file) { return file ? file->f_inode->i_size : 0; }
+static size_t file_len(struct file *file) {
+    return file ? file->f_inode->i_size : 0;
+}
+
+// static void __user *file_mmap(struct file *file, loff_t offset, size_t size)
+// {
+//     mm_segment_t old_fs = get_fs();
+//     set_fs(KERNEL_DS);
+//     void __user *ret =
+//         (void __user *)vm_mmap(file, offset, size, PROT_READ, MAP_PRIVATE,
+//         0);
+//     set_fs(old_fs);
+//     return ret;
+// }
+
+// static void file_munmap(void *space, size_t size) {
+//     mm_segment_t old_fs = get_fs();
+//     set_fs(KERNEL_DS);
+//     vm_munmap(space, size);
+//     set_fs(old_fs);
+// }
 
 size_t zfile_len(struct zfile *zfile) { return zfile->header.vsize; }
 
@@ -88,7 +111,10 @@ ssize_t zfile_read(struct zfile *zf, void *dst, size_t count, loff_t offset) {
         }
         loff_t poff = offset - decomp_offset;
         size_t pcnt = count > (dc - poff) ? (dc - poff) : count;
-        pr_info("zfile: decompress %d block, offset=%ld decomp_offset=%ld cut poff=%ld pcnt=%lu\n", i, offset, decomp_offset, poff, pcnt);
+        pr_info(
+            "zfile: decompress %d block, offset=%ld decomp_offset=%ld cut "
+            "poff=%ld pcnt=%lu\n",
+            i, offset, decomp_offset, poff, pcnt);
         memcpy(dst, decomp_buf + poff, pcnt);
         decomp_offset += dc;
         dst += pcnt;
@@ -107,7 +133,6 @@ fail_read:
 
 void build_jump_table(uint32_t *jt_saved, struct zfile *zf) {
     size_t i;
-
     zf->jump = vmalloc((zf->header.index_size + 2) * sizeof(struct jump_table));
     zf->jump[0].partial_offset = ZF_SPACE;
     for (i = 0; i < zf->header.index_size; i++) {
@@ -120,6 +145,9 @@ void build_jump_table(uint32_t *jt_saved, struct zfile *zf) {
 void zfile_close(struct zfile *zfile) {
     pr_info("zfile: close %lx\n", zfile);
     if (zfile) {
+        if (zfile->map) {
+            file_munmap(zfile->map, file_len(zfile->fp));
+        }
         if (zfile->jump) {
             vfree(zfile->jump);
             zfile->jump = NULL;
@@ -151,18 +179,28 @@ struct zfile *zfile_open(const char *path) {
         goto fail_open;
     }
 
+    // zfile->map = file_mmap(zfile->fp, 0, file_len(zfile->fp));
+
     ret = file_read(zfile->fp, &zfile->header, sizeof(struct zfile_ht), 0);
 
     if (ret < (ssize_t)sizeof(struct zfile_ht)) {
         printk("failed to load header %d \n", ret);
         goto fail_open;
     }
+    // pr_info("before copy header");
+    // memcpy(&zfile->header, zfile->map, sizeof(struct zfile_ht));
+    // pr_info("after copy header");
 
     // should verify header
 
     size_t file_size = file_len(zfile->fp);
     loff_t tailer_offset = file_size - ZF_SPACE;
-    ret = file_read(zfile->fp, &zfile->header, ZF_SPACE, tailer_offset);
+    ret = file_read(zfile->fp, &zfile->header, sizeof(struct zfile_ht),
+                    tailer_offset);
+    // pr_info("before copy tailer");
+    // memcpy(&zfile->header, zfile->map + tailer_offset,
+    //         sizeof(struct zfile_ht));
+    // pr_info("after copy tailer");
 
     pr_info("Header vsize=%ld index_offset=%ld index_size=%ld verify=%d\n",
             zfile->header.vsize, zfile->header.index_offset,
@@ -176,10 +214,9 @@ struct zfile *zfile_open(const char *path) {
            zfile->header.index_offset);
 
     jt_saved = vmalloc(jt_size);
+    // jt_saved = zfile->map + zfile->header.index_offset;
 
-    loff_t index_offset = zfile->header.index_offset;
-    ret = file_read(zfile->fp, jt_saved, jt_size, index_offset);
-    for (i = 0; i < 4; i++) printk("jt_saved[%d] = %d", i, jt_saved[i]);
+    ret = file_read(zfile->fp, jt_saved, jt_size, zfile->header.index_offset);
 
     build_jump_table(jt_saved, zfile);
 

@@ -137,6 +137,7 @@ struct zfile {
         struct file *fp;
 	struct zfile_ht header;
         struct jump_table *jump;
+        // void __user * map;
 };
 
 // zfile functions
