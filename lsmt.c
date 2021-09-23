@@ -15,7 +15,7 @@ static uint64_t segment_end(const struct segment_mapping *s) {
 }
 
 void forward_offset_to(struct segment_mapping *s, uint64_t x) {
-    pr_info("LSMT: Forward x=%lu, off=%lu\n", x, s->offset);
+    // pr_info("LSMT: Forward x=%lu, off=%lu\n", x, s->offset);
     uint64_t delta = x - s->offset;
     s->offset = x;
     s->length -= delta;
@@ -23,9 +23,9 @@ void forward_offset_to(struct segment_mapping *s, uint64_t x) {
 }
 
 void backward_end_to(struct segment_mapping *s, uint64_t x) {
-    if (x <= s->offset) {
-        printk("%lu > %lu is FALSE", x, s->offset);
-    }
+    // if (x <= s->offset) {
+    //     printk("%lu > %lu is FALSE", x, s->offset);
+    // }
 
     s->length = x - s->offset;
 }
@@ -132,9 +132,9 @@ struct lsmt_file *lsmt_open(struct zfile *fp) {
     uint64_t idx = 0;
     for (idx = 0; idx < lf->ht.index_size; idx++) {
         if (p[idx].offset != INVALID_OFFSET) {
-            pr_info("LSMT: index[%d] offset=%ld length=%ld moffset=%ld zeroed=%d\n", idx,
-                    p[idx].offset * SECTOR_SIZE, p[idx].length * SECTOR_SIZE,
-                    p[idx].moffset * SECTOR_SIZE, p[idx].zeroed);
+            // pr_info("LSMT: index[%d] offset=%ld length=%ld moffset=%ld zeroed=%d\n", idx,
+            //         p[idx].offset * SECTOR_SIZE, p[idx].length * SECTOR_SIZE,
+            //         p[idx].moffset * SECTOR_SIZE, p[idx].zeroed);
             p[cnt] = p[idx];
             p[cnt].tag = 0;
             cnt++;
@@ -184,8 +184,8 @@ ssize_t lsmt_read(struct lsmt_file *fp, void *buf, size_t count,
         for (i = 0; i < n; ++i) {
             if (s.offset < m[i].offset) {
                 // hole
-                pr_info("LSMT: %d set %ld, %lu to 0\n", i, offset,
-                        (m[i].offset - s.offset) * SECTOR_SIZE);
+                // pr_info("LSMT: %d set %ld, %lu to 0\n", i, offset,
+                        // (m[i].offset - s.offset) * SECTOR_SIZE);
                 memset(buf, 0, (m->offset - s.offset) * SECTOR_SIZE);
                 offset += (m[i].offset - s.offset) * SECTOR_SIZE;
                 buf += (m[i].offset - s.offset) * SECTOR_SIZE;
@@ -193,23 +193,23 @@ ssize_t lsmt_read(struct lsmt_file *fp, void *buf, size_t count,
             }
             // zeroe block
             if (m[i].zeroed) {
-                pr_info("LSMT: %d set %ld, %lu to 0\n", i, offset,
-                        m[i].length * SECTOR_SIZE);
+                // pr_info("LSMT: %d set %ld, %lu to 0\n", i, offset,
+                //         m[i].length * SECTOR_SIZE);
                 memset(buf, 0, m->length * SECTOR_SIZE);
                 offset += m[i].length * SECTOR_SIZE;
                 buf += m[i].length * SECTOR_SIZE;
                 ret += m[i].length * SECTOR_SIZE;
             } else {
-                pr_info("LSMT: %d decompress copy %ld, %lu, moffset=%ld\n", i,
-                        offset, m[i].length * SECTOR_SIZE,
-                        m[i].moffset * SECTOR_SIZE);
+                // pr_info("LSMT: %d decompress copy %ld, %lu, moffset=%ld\n", i,
+                //         offset, m[i].length * SECTOR_SIZE,
+                //         m[i].moffset * SECTOR_SIZE);
                 ssize_t dc = zfile_read(fp->fp, buf, m->length * SECTOR_SIZE,
                                         m->moffset * SECTOR_SIZE);
                 if (dc <= 0) {
                     pr_info("LSMT: read failed ret=%ld\n", dc);
                     goto out;
                 }
-                pr_info("LSMT: zfile read %ld bytes\n", dc);
+                // pr_info("LSMT: zfile read %ld bytes\n", dc);
                 offset += m[i].length * SECTOR_SIZE;
                 buf += m[i].length * SECTOR_SIZE;
                 ret += m[i].length * SECTOR_SIZE;
@@ -219,7 +219,7 @@ ssize_t lsmt_read(struct lsmt_file *fp, void *buf, size_t count,
         if (n < 16) break;
     }
     if (s.length > 0) {
-        pr_info("LSMT: set %ld, %lu to 0\n", offset, s.length * SECTOR_SIZE);
+        // pr_info("LSMT: set %ld, %lu to 0\n", offset, s.length * SECTOR_SIZE);
         memset(buf, 0, s.length * SECTOR_SIZE);
         offset += s.length * SECTOR_SIZE;
         ret += s.length * SECTOR_SIZE;

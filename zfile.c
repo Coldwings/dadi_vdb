@@ -23,23 +23,30 @@ static struct file *file_open(const char *path, int flags, int rights) {
 
 static void file_close(struct file *file) { filp_close(file, NULL); }
 
-static size_t file_read(struct file *file, void *buf, size_t count,
-                        loff_t pos) {
-    unsigned int ret = -4;
-    loff_t lpos;
-    int cnt = 10;
-    while (ret == -4 && (--cnt)) {
-        lpos = pos;
-        ret = kernel_read(file, buf, count, &lpos);
-    }
-    if (!ret) {
-        printk("reading data failed at %d", pos);
-    }
-    return ret;
-}
-
 static size_t file_len(struct file *file) {
     return file ? file->f_inode->i_size : 0;
+}
+
+static ssize_t file_read(struct file *file, void *buf, size_t count,
+                         loff_t pos) {
+    int ret, sret = 0;
+    loff_t lpos;
+    size_t flen = file_len(file);
+    // pr_info("zfile: Trying to read underlay file %ld %lu\n", pos, count);
+    if (pos > flen) return 0;
+    if (pos + count > flen) count = flen - pos;
+    while (count > 0) {
+        lpos = pos;
+        // pr_info("zfile: read underlay file at %ld count=%lu\n", lpos, count);
+        ret = kernel_read(file, buf, count, &lpos);
+        // pr_info("zfile: read underlay file at %ld, pos move to %ld, return %ld\n", pos, lpos, ret);
+        if (lpos < pos) return ret;
+        count -= (lpos - pos);
+        buf += (lpos - pos);
+        sret += (lpos - pos);
+        pos += lpos;
+    }
+    return sret;
 }
 
 size_t zfile_len(struct zfile *zfile) { return zfile->header.vsize; }
@@ -49,10 +56,11 @@ ssize_t zfile_read(struct zfile *zf, void *dst, size_t count, loff_t offset) {
     loff_t begin, range, filloff;
     size_t bs;
     ssize_t ret;
-    int dc, i;
-    pr_info("zfile: read off=%ld cnt=%lu\n", offset, count);
+    int dc;
+    ssize_t i;
+    // pr_info("zfile: read off=%ld cnt=%lu\n", offset, count);
     if (!zf) {
-        pr_info("zfile: failed empty zf\n");
+        // pr_info("zfile: failed empty zf\n");
         return -EIO;
     }
     bs = zf->header.opt.block_size;
@@ -60,7 +68,7 @@ ssize_t zfile_read(struct zfile *zf, void *dst, size_t count, loff_t offset) {
     if (count == 0) return 0;
     // read from over-tail
     if (offset > zf->header.vsize) {
-        pr_info("zfile: read over tail %ld > %ld\n", offset, zf->header.vsize);
+        // pr_info("zfile: read over tail %ld > %ld\n", offset, zf->header.vsize);
         return 0;
     }
     // read till tail
@@ -78,13 +86,15 @@ ssize_t zfile_read(struct zfile *zf, void *dst, size_t count, loff_t offset) {
     unsigned char *decomp_buf;
     decomp_buf = kmalloc(4096, GFP_KERNEL);
 
+    // pr_info("zfile: before read file %ld %lu\n", begin, range);
     // read compressed data
     ret = file_read(zf->fp, src_buf, range, begin);
     if (ret != range) {
-        pr_info("zfile: Read file failed, %d != %d\n", ret, range);
+        // pr_info("zfile: Read file failed, %d != %d\n", ret, range);
         ret = -EIO;
         goto fail_read;
     }
+    // pr_info("after read file %ld\n", ret);
 
     unsigned char *c_buf = src_buf;
 
@@ -92,20 +102,24 @@ ssize_t zfile_read(struct zfile *zf, void *dst, size_t count, loff_t offset) {
     loff_t decomp_offset = offset - offset % bs;
     ret = 0;
     for (i = start_idx; i <= end_idx; i++) {
+        // pr_info("zfile: before decompress %ld [%lu %lu]\n", i, start_idx,
+        //         end_idx);
         dc = LZ4_decompress_safe(
             c_buf, decomp_buf,
             zf->jump[i].delta - (zf->header.opt.verify ? sizeof(uint32_t) : 0),
             bs);
-        if (dc < bs && decomp_offset + dc < zf->header.vsize) {
-            pr_info("Failed to read\n");
+        // pr_info("zfile: after decompress %ld\n", dc);
+        if (dc <= 0) {
+            pr_info("decompress failed\n");
+            ret = -EIO;
             goto fail_read;
         }
         loff_t poff = offset - decomp_offset;
         size_t pcnt = count > (dc - poff) ? (dc - poff) : count;
-        pr_info(
-            "zfile: decompress %d block, offset=%ld decomp_offset=%ld cut "
-            "poff=%ld pcnt=%lu\n",
-            i, offset, decomp_offset, poff, pcnt);
+        // pr_info(
+        //     "zfile: decompress %d block, offset=%ld decomp_offset=%ld cut "
+        //     "poff=%ld pcnt=%lu\n",
+        //     i, offset, decomp_offset, poff, pcnt);
         memcpy(dst, decomp_buf + poff, pcnt);
         decomp_offset += dc;
         dst += pcnt;
@@ -167,7 +181,6 @@ struct zfile *zfile_open(const char *path) {
         goto fail_open;
     }
 
-
     ret = file_read(zfile->fp, &zfile->header, sizeof(struct zfile_ht), 0);
 
     if (ret < (ssize_t)sizeof(struct zfile_ht)) {
@@ -179,6 +192,7 @@ struct zfile *zfile_open(const char *path) {
 
     size_t file_size = file_len(zfile->fp);
     loff_t tailer_offset = file_size - ZF_SPACE;
+    pr_info("file_size=%lu\n", file_size);
     ret = file_read(zfile->fp, &zfile->header, sizeof(struct zfile_ht),
                     tailer_offset);
 
