@@ -26,8 +26,12 @@ static void file_close(struct file *file) { filp_close(file, NULL); }
 static size_t file_read(struct file *file, void *buf, size_t count,
                         loff_t pos) {
     unsigned int ret = -4;
-    while (ret == -4)
-        ret = kernel_read(file, buf, count, &pos);
+    loff_t lpos;
+    int cnt = 10;
+    while (ret == -4 && (--cnt)) {
+        lpos = pos;
+        ret = kernel_read(file, buf, count, &lpos);
+    }
     if (!ret) {
         printk("reading data failed at %d", pos);
     }
