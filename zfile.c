@@ -29,7 +29,7 @@ static size_t file_len(struct file *file) {
 
 static ssize_t file_read(struct file *file, void *buf, size_t count,
                          loff_t pos) {
-    int ret, sret = 0;
+    ssize_t ret, sret = 0;
     loff_t lpos;
     size_t lcnt;
     size_t flen = file_len(file);
