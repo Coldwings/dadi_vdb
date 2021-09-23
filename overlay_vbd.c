@@ -51,11 +51,11 @@ static int ovbd_do_bvec(struct ovbd_device *ovbd, struct page *page,
 	// 不从page缓存加载，替换了copy_from_ovbd
 	// copy_from_ovbd(mem + off, ovbd, sector, len);
 	loff = sector << SECTOR_SHIFT;
-	pr_info("vbd: dobvec loff=%ld sector=%lu off=%d len=%lu ret=%ld op=%x\n", loff, sector, off, len, ret, ovbd->fp, op);
+	// pr_info("vbd: dobvec loff=%ld sector=%lu off=%d len=%lu ret=%ld op=%x\n", loff, sector, off, len, ret, ovbd->fp, op);
 	// loff指文件上（block上的逻辑的）offset
 	// 必定对齐PAGS_SIZE，一次读取一个PAGE
 	ret = lsmt_read(ovbd->fp, mem + off, len, loff);
-	pr_info("vbd: dobvec ret\n", ret);
+	// pr_info("vbd: dobvec ret\n", ret);
 	flush_dcache_page(page);
 	kunmap_atomic(mem);
 
@@ -80,7 +80,7 @@ static blk_qc_t ovbd_make_request(struct request_queue *q, struct bio *bio)
 		/* Don't support un-aligned buffer */
 		WARN_ON_ONCE((bvec.bv_offset & (SECTOR_SIZE - 1)) ||
 				(bvec.bv_len & (SECTOR_SIZE - 1)));
-		pr_info("vbd: make request\n");
+		// pr_info("vbd: make request\n");
 		err = ovbd_do_bvec(ovbd, bvec.bv_page, bvec.bv_len, bvec.bv_offset,
 				  bio_op(bio), sector);
 		if (err)

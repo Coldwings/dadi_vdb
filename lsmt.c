@@ -174,7 +174,7 @@ ssize_t lsmt_read(struct lsmt_file *fp, void *buf, size_t count,
         pr_info("LSMT: %ld %lu over tail\n", offset, count);
         count = fp->ht.virtual_size - offset;
     }
-    pr_info("LSMT: read %ld %ld\n", offset, count);
+    // pr_info("LSMT: read %ld %ld\n", offset, count);
     struct segment_mapping *m = kmalloc(16 * sizeof(struct segment_mapping), GFP_KERNEL);
     struct segment_mapping s;
     s.offset = offset / SECTOR_SIZE;
