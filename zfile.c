@@ -40,9 +40,9 @@ static ssize_t file_read(struct file *file, void *buf, size_t count,
         // pr_info("zfile: read underlay file at %ld count=%lu\n", lpos, count);
         ret = kernel_read(file, buf, count, &lpos);
         // pr_info("zfile: read underlay file at %ld, pos move to %ld, return %ld\n", pos, lpos, ret);
-        if (lpos < pos) {
+        if (lpos <= pos || ret <= 0) {
             pr_info("zfile: read underlay file at %ld, pos move to %ld, return %ld\n", pos, lpos, ret);
-            return 0;
+            continue;
         }
         count -= (lpos - pos);
         buf += (lpos - pos);
