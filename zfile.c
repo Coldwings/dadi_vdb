@@ -31,14 +31,16 @@ static ssize_t file_read(struct file *file, void *buf, size_t count,
                          loff_t pos) {
     int ret, sret = 0;
     loff_t lpos;
+    size_t lcnt;
     size_t flen = file_len(file);
     // pr_info("zfile: Trying to read underlay file %ld %lu\n", pos, count);
     if (pos > flen) return 0;
     if (pos + count > flen) count = flen - pos;
     while (count > 0) {
         lpos = pos;
+        lcnt = count > 4096 ? count : 4096;
         // pr_info("zfile: read underlay file at %ld count=%lu\n", lpos, count);
-        ret = kernel_read(file, buf, count, &lpos);
+        ret = kernel_read(file, buf, lcnt, &lpos);
         // pr_info("zfile: read underlay file at %ld, pos move to %ld, return %ld\n", pos, lpos, ret);
         if (lpos <= pos || ret <= 0) {
             pr_info("zfile: read underlay file at %ld, pos move to %ld, return %ld\n", pos, lpos, ret);
