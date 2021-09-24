@@ -15,7 +15,6 @@ static uint64_t segment_end(const struct segment_mapping *s) {
 }
 
 void forward_offset_to(struct segment_mapping *s, uint64_t x) {
-    // pr_info("LSMT: Forward x=%lu, off=%lu\n", x, s->offset);
     uint64_t delta = x - s->offset;
     s->offset = x;
     s->length -= delta;
@@ -23,10 +22,6 @@ void forward_offset_to(struct segment_mapping *s, uint64_t x) {
 }
 
 void backward_end_to(struct segment_mapping *s, uint64_t x) {
-    // if (x <= s->offset) {
-    //     printk("%lu > %lu is FALSE", x, s->offset);
-    // }
-
     s->length = x - s->offset;
 }
 
@@ -123,8 +118,7 @@ struct lsmt_file *lsmt_open(struct zfile *fp) {
 
     ssize_t index_bytes = lf->ht.index_size * sizeof(struct segment_mapping);
     pr_info("LSMT: off: %ld, bytes: %ld\n", lf->ht.index_offset, index_bytes);
-    if (index_bytes == 0 || index_bytes > 1024UL * 1024 * 1024)
-        return NULL;
+    if (index_bytes == 0 || index_bytes > 1024UL * 1024 * 1024) return NULL;
     p = vmalloc(index_bytes);
     pr_info("LSMT: loadindex off: %ld cnt: %ld into %lx\n", lf->ht.index_offset,
             index_bytes, p);
@@ -139,7 +133,8 @@ struct lsmt_file *lsmt_open(struct zfile *fp) {
     uint64_t idx = 0;
     for (idx = 0; idx < lf->ht.index_size; idx++) {
         if (p[idx].offset != INVALID_OFFSET) {
-            // pr_info("LSMT: index[%d] offset=%ld length=%ld moffset=%ld zeroed=%d\n", idx,
+            // pr_info("LSMT: index[%d] offset=%ld length=%ld moffset=%ld
+            // zeroed=%d\n", idx,
             //         p[idx].offset * SECTOR_SIZE, p[idx].length * SECTOR_SIZE,
             //         p[idx].moffset * SECTOR_SIZE, p[idx].zeroed);
             p[cnt] = p[idx];
@@ -181,7 +176,8 @@ ssize_t lsmt_read(struct lsmt_file *fp, void *buf, size_t count,
         count = fp->ht.virtual_size - offset;
     }
     pr_info("LSMT: read %ld %ld\n", offset, count);
-    struct segment_mapping *m = kmalloc(16 * sizeof(struct segment_mapping), GFP_KERNEL);
+    struct segment_mapping *m =
+        kmalloc(16 * sizeof(struct segment_mapping), GFP_KERNEL);
     struct segment_mapping s;
     s.offset = offset / SECTOR_SIZE;
     s.length = count / SECTOR_SIZE;

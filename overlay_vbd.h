@@ -9,7 +9,8 @@
 #include <linux/err.h>
 #include <linux/printk.h>
 #include <linux/uuid.h>
-#include <linux/fs.h>
+#include <linux/kthread.h>
+#include <linux/blk-mq.h>
 
 #define PRINT_INFO(fmt, ...)                                     \
 	do { if ((HBDEBUG)) \
@@ -194,18 +195,20 @@ struct ovbd_device {
 	struct lsmt_file* fp;
  	unsigned char* path;
 
-	// struct kthread_worker	worker;
-	// struct task_struct	*worker_task;
+	struct kthread_worker	worker;
+	struct task_struct	*worker_task;
+
+        struct blk_mq_tag_set	tag_set;
 	// bool initialized ;
 
 };
 
-// struct ovbd_cmd {
-//         struct kthread_work work;
-//         long ret;
-//         struct kiocb iocb;
-//         struct bio_vec *bvec;
-// };
+struct ovbd_cmd {
+        struct kthread_work work;
+        long ret;
+        struct kiocb iocb;
+        struct bio_vec *bvec;
+};
 
 /*struct file *file_open(const char *path, int flags, int rights)
 void  file_close(struct file *file)

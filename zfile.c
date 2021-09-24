@@ -3,11 +3,11 @@
 //#include <asm/uaccess.h>
 #include <linux/buffer_head.h>
 #include <linux/errno.h>
-#include <linux/uio.h>
 #include <linux/lz4.h>
 #include <linux/mm.h>
 #include <linux/mman.h>
 #include <linux/slab.h>
+#include <linux/uio.h>
 #include <linux/vmalloc.h>
 
 #include "overlay_vbd.h"
@@ -75,8 +75,8 @@ static ssize_t file_read(struct file *file, void *buf, size_t count,
                 count + skip < PAGE_SIZE ? count + skip : PAGE_SIZE);
         // iov.iov_base = prebuf;
         // iov.iov_len = PAGE_SIZE;
-        // iov_iter_kvec(&iter, READ, &iov, 1, count + skip < PAGE_SIZE ? count + skip : PAGE_SIZE);
-        // ret = vfs_iter_read(file, &iter, &lpos, 0);
+        // iov_iter_kvec(&iter, READ, &iov, 1, count + skip < PAGE_SIZE ? count
+        // + skip : PAGE_SIZE); ret = vfs_iter_read(file, &iter, &lpos, 0);
         ret = kernel_read(
             file, prebuf,
             (count + skip < PAGE_SIZE) ? (count + skip) : PAGE_SIZE, &lpos);
@@ -152,7 +152,7 @@ ssize_t zfile_read(struct zfile *zf, void *dst, size_t count, loff_t offset) {
         ret = -EIO;
         goto fail_read;
     }
-    pr_info("after read file %ld\n", ret);
+    pr_info("zfile: after read file %ld\n", ret);
 
     unsigned char *c_buf = src_buf;
 
@@ -254,9 +254,10 @@ struct zfile *zfile_open(const char *path) {
     ret = file_read(zfile->fp, &zfile->header, sizeof(struct zfile_ht),
                     tailer_offset);
 
-    pr_info("zfile: Tailer vsize=%ld index_offset=%ld index_size=%ld verify=%d\n",
-            zfile->header.vsize, zfile->header.index_offset,
-            zfile->header.index_size, zfile->header.opt.verify);
+    pr_info(
+        "zfile: Tailer vsize=%ld index_offset=%ld index_size=%ld verify=%d\n",
+        zfile->header.vsize, zfile->header.index_offset,
+        zfile->header.index_size, zfile->header.opt.verify);
 
     pr_info("zfile: vlen=%ld size=%ld\n", zfile->header.vsize,
             zfile_len(zfile));
@@ -265,7 +266,7 @@ struct zfile *zfile_open(const char *path) {
     printk("get index_size %d, index_offset %d", jt_size,
            zfile->header.index_offset);
 
-    if (jt_size == 0 || jt_size > 1024UL*1024*1024) {
+    if (jt_size == 0 || jt_size > 1024UL * 1024 * 1024) {
         goto fail_open;
     }
 
