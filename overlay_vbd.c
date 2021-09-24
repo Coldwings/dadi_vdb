@@ -46,7 +46,7 @@ static int ovbd_do_bvec(struct ovbd_device *ovbd, struct page *page,
     }
     mem = kmap_atomic(page);
     ret = lsmt_read(ovbd->fp, mem + lof, size, (offset & PAGE_MASK) + lof);
-    pr_info("vbd: dobvec ret %d\n", ret);
+    // pr_info("vbd: dobvec ret %d\n", ret);
     flush_dcache_page(page);
     kunmap_atomic(mem);
 
@@ -257,6 +257,7 @@ static struct ovbd_device *ovbd_alloc(int i) {
      *  is harmless)
      */
     blk_queue_physical_block_size(ovbd->ovbd_queue, PAGE_SIZE);
+	blk_queue_logical_block_size(ovbd->ovbd_queue, PAGE_SIZE);
     disk = ovbd->ovbd_disk = alloc_disk(max_part);
     if (!disk) goto out_free_queue;
     disk->major = OVBD_MAJOR;

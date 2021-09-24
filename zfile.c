@@ -37,72 +37,28 @@ static ssize_t file_read(struct file *file, void *buf, size_t count,
     loff_t lpos;
     size_t lcnt;
     size_t flen = file_len(file);
-    pr_info("zfile: Trying to read underlay file %ld %lu\n", pos, count);
+    // pr_info("zfile: Trying to read underlay file %ld %lu\n", pos, count);
     if (pos > flen) return 0;
     if (pos + count > flen) count = flen - pos;
-    pr_info("zfile: underlay file read off=%ld count=%lu\n", pos, count);
-    // mm_segment_t old_fs = get_fs();
-    // set_fs(KERNEL_DS);
-    lpos = pos & PAGE_MASK;
-    if (lpos == pos) {  // aligned read
-        while (count > 0) {
-            lpos = pos;
-            pr_info("zfile: read underlay file at %ld count=%lu\n", lpos,
-                    count);
-            // iov.iov_base = buf;
-            // iov.iov_len = count;
-            // iov_iter_kvec(&iter, READ, &iov, 1, count);
-            // ret = vfs_iter_read(file, &iter, &lpos, 0);
-            ret = kernel_read(file, buf, count, &lpos);
-            if (lpos <= pos || ret <= 0) {
-                pr_info(
-                    "zfile: read underlay file at %ld, pos move to %ld, return "
-                    "%ld\n",
-                    pos, lpos, ret);
-                sret = ret;
-                goto out;
-            }
-            count -= (lpos - pos);
-            buf += (lpos - pos);
-            sret += (lpos - pos);
-            pos = lpos;
+    // pr_info("zfile: underlay file read off=%ld count=%lu\n", pos, count);
+    while (count > 0) {
+        lpos = pos;
+        // pr_info("zfile: read underlay file at %ld count=%lu\n", lpos,
+        //         count);
+        ret = kernel_read(file, buf, count, &lpos);
+        if (lpos <= pos || ret <= 0) {
+            // pr_info(
+            //     "zfile: read underlay file at %ld, pos move to %ld, return "
+            //     "%ld\n",
+            //     pos, lpos, ret);
+            return ret;
         }
-    } else {  // read that not aligned
-        void *prebuf = kmalloc(PAGE_SIZE, GFP_KERNEL);
-        loff_t skip = pos - lpos;
-        pr_info("zfile: before kernel read preface block [%ld, %ld)\n",
-                pos & PAGE_MASK,
-                count + skip < PAGE_SIZE ? count + skip : PAGE_SIZE);
-        // iov.iov_base = prebuf;
-        // iov.iov_len = PAGE_SIZE;
-        // iov_iter_kvec(&iter, READ, &iov, 1, count + skip < PAGE_SIZE ? count
-        // + skip : PAGE_SIZE); ret = vfs_iter_read(file, &iter, &lpos, 0);
-        ret = kernel_read(
-            file, prebuf,
-            (count + skip < PAGE_SIZE) ? (count + skip) : PAGE_SIZE, &lpos);
-        pr_info("zfile: kernel read preface block [%ld, %ld) returned %ld\n",
-                pos & PAGE_MASK,
-                count + skip < PAGE_SIZE ? count + skip : PAGE_SIZE, ret);
-        if (ret <= skip) {
-            kfree(prebuf);
-            sret = ret;
-            goto out;
-        }
-        pr_info("zfile: copy preface %ld, %lu to buffer\n",
-                (pos & PAGE_MASK) + skip, ret - skip);
-        memcpy(buf, prebuf + skip, ret - skip);
-        kfree(prebuf);
-        if (lpos < pos + count) {
-            sret =
-                file_read(file, buf + (ret - skip), count - (ret - skip), lpos);
-            if (sret < 0) {
-                goto out;
-            }
-        }
-        sret += ret - skip;
+        count -= (lpos - pos);
+        buf += (lpos - pos);
+        sret += (lpos - pos);
+        pos = lpos;
     }
-out:
-    // set_fs(old_fs);
+
     return sret;
 }
 
@@ -115,7 +71,7 @@ ssize_t zfile_read(struct zfile *zf, void *dst, size_t count, loff_t offset) {
     ssize_t ret;
     int dc;
     ssize_t i;
-    pr_info("zfile: read off=%ld cnt=%lu\n", offset, count);
+    // pr_info("zfile: read off=%ld cnt=%lu\n", offset, count);
     if (!zf) {
         // pr_info("zfile: failed empty zf\n");
         return -EIO;
@@ -144,7 +100,7 @@ ssize_t zfile_read(struct zfile *zf, void *dst, size_t count, loff_t offset) {
     unsigned char *decomp_buf;
     decomp_buf = kmalloc(4096, GFP_KERNEL);
 
-    pr_info("zfile: before read file %ld %lu\n", begin, range);
+    // pr_info("zfile: before read file %ld %lu\n", begin, range);
     // read compressed data
     ret = file_read(zf->fp, src_buf, range, begin);
     if (ret != range) {
@@ -152,7 +108,7 @@ ssize_t zfile_read(struct zfile *zf, void *dst, size_t count, loff_t offset) {
         ret = -EIO;
         goto fail_read;
     }
-    pr_info("zfile: after read file %ld\n", ret);
+    // pr_info("zfile: after read file %ld\n", ret);
 
     unsigned char *c_buf = src_buf;
 
