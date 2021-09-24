@@ -2,6 +2,8 @@
 #include <linux/fs.h>
 //#include <asm/uaccess.h>
 #include <linux/buffer_head.h>
+#include <linux/errno.h>
+#include <linux/uio.h>
 #include <linux/lz4.h>
 #include <linux/mm.h>
 #include <linux/mman.h>
@@ -30,27 +32,77 @@ static size_t file_len(struct file *file) {
 static ssize_t file_read(struct file *file, void *buf, size_t count,
                          loff_t pos) {
     ssize_t ret, sret = 0;
+    // struct kvec iov;
+    // struct iov_iter iter;
     loff_t lpos;
     size_t lcnt;
     size_t flen = file_len(file);
-    // pr_info("zfile: Trying to read underlay file %ld %lu\n", pos, count);
+    pr_info("zfile: Trying to read underlay file %ld %lu\n", pos, count);
     if (pos > flen) return 0;
     if (pos + count > flen) count = flen - pos;
-    while (count > 0) {
-        lpos = pos;
-        lcnt = count > 4096 ? count : 4096;
-        // pr_info("zfile: read underlay file at %ld count=%lu\n", lpos, count);
-        ret = kernel_read(file, buf, lcnt, &lpos);
-        // pr_info("zfile: read underlay file at %ld, pos move to %ld, return %ld\n", pos, lpos, ret);
-        if (lpos <= pos || ret <= 0) {
-            pr_info("zfile: read underlay file at %ld, pos move to %ld, return %ld\n", pos, lpos, ret);
-            continue;
+    pr_info("zfile: underlay file read off=%ld count=%lu\n", pos, count);
+    // mm_segment_t old_fs = get_fs();
+    // set_fs(KERNEL_DS);
+    lpos = pos & PAGE_MASK;
+    if (lpos == pos) {  // aligned read
+        while (count > 0) {
+            lpos = pos;
+            pr_info("zfile: read underlay file at %ld count=%lu\n", lpos,
+                    count);
+            // iov.iov_base = buf;
+            // iov.iov_len = count;
+            // iov_iter_kvec(&iter, READ, &iov, 1, count);
+            // ret = vfs_iter_read(file, &iter, &lpos, 0);
+            ret = kernel_read(file, buf, count, &lpos);
+            if (lpos <= pos || ret <= 0) {
+                pr_info(
+                    "zfile: read underlay file at %ld, pos move to %ld, return "
+                    "%ld\n",
+                    pos, lpos, ret);
+                sret = ret;
+                goto out;
+            }
+            count -= (lpos - pos);
+            buf += (lpos - pos);
+            sret += (lpos - pos);
+            pos = lpos;
         }
-        count -= (lpos - pos);
-        buf += (lpos - pos);
-        sret += (lpos - pos);
-        pos += lpos;
+    } else {  // read that not aligned
+        void *prebuf = kmalloc(PAGE_SIZE, GFP_KERNEL);
+        loff_t skip = pos - lpos;
+        pr_info("zfile: before kernel read preface block [%ld, %ld)\n",
+                pos & PAGE_MASK,
+                count + skip < PAGE_SIZE ? count + skip : PAGE_SIZE);
+        // iov.iov_base = prebuf;
+        // iov.iov_len = PAGE_SIZE;
+        // iov_iter_kvec(&iter, READ, &iov, 1, count + skip < PAGE_SIZE ? count + skip : PAGE_SIZE);
+        // ret = vfs_iter_read(file, &iter, &lpos, 0);
+        ret = kernel_read(
+            file, prebuf,
+            (count + skip < PAGE_SIZE) ? (count + skip) : PAGE_SIZE, &lpos);
+        pr_info("zfile: kernel read preface block [%ld, %ld) returned %ld\n",
+                pos & PAGE_MASK,
+                count + skip < PAGE_SIZE ? count + skip : PAGE_SIZE, ret);
+        if (ret <= skip) {
+            kfree(prebuf);
+            sret = ret;
+            goto out;
+        }
+        pr_info("zfile: copy preface %ld, %lu to buffer\n",
+                (pos & PAGE_MASK) + skip, ret - skip);
+        memcpy(buf, prebuf + skip, ret - skip);
+        kfree(prebuf);
+        if (lpos < pos + count) {
+            sret =
+                file_read(file, buf + (ret - skip), count - (ret - skip), lpos);
+            if (sret < 0) {
+                goto out;
+            }
+        }
+        sret += ret - skip;
     }
+out:
+    // set_fs(old_fs);
     return sret;
 }
 
@@ -63,7 +115,7 @@ ssize_t zfile_read(struct zfile *zf, void *dst, size_t count, loff_t offset) {
     ssize_t ret;
     int dc;
     ssize_t i;
-    // pr_info("zfile: read off=%ld cnt=%lu\n", offset, count);
+    pr_info("zfile: read off=%ld cnt=%lu\n", offset, count);
     if (!zf) {
         // pr_info("zfile: failed empty zf\n");
         return -EIO;
@@ -73,7 +125,8 @@ ssize_t zfile_read(struct zfile *zf, void *dst, size_t count, loff_t offset) {
     if (count == 0) return 0;
     // read from over-tail
     if (offset > zf->header.vsize) {
-        // pr_info("zfile: read over tail %ld > %ld\n", offset, zf->header.vsize);
+        // pr_info("zfile: read over tail %ld > %ld\n", offset,
+        // zf->header.vsize);
         return 0;
     }
     // read till tail
@@ -91,15 +144,15 @@ ssize_t zfile_read(struct zfile *zf, void *dst, size_t count, loff_t offset) {
     unsigned char *decomp_buf;
     decomp_buf = kmalloc(4096, GFP_KERNEL);
 
-    // pr_info("zfile: before read file %ld %lu\n", begin, range);
+    pr_info("zfile: before read file %ld %lu\n", begin, range);
     // read compressed data
     ret = file_read(zf->fp, src_buf, range, begin);
     if (ret != range) {
-        // pr_info("zfile: Read file failed, %d != %d\n", ret, range);
+        pr_info("zfile: Read file failed, %d != %d\n", ret, range);
         ret = -EIO;
         goto fail_read;
     }
-    // pr_info("after read file %ld\n", ret);
+    pr_info("after read file %ld\n", ret);
 
     unsigned char *c_buf = src_buf;
 
@@ -182,14 +235,14 @@ struct zfile *zfile_open(const char *path) {
 
     zfile->fp = file_open(path, 0, 644);
     if (!zfile->fp) {
-        printk("Canot open zfile %s\n", path);
+        printk("zfile: Canot open zfile %s\n", path);
         goto fail_open;
     }
 
     ret = file_read(zfile->fp, &zfile->header, sizeof(struct zfile_ht), 0);
 
     if (ret < (ssize_t)sizeof(struct zfile_ht)) {
-        printk("failed to load header %d \n", ret);
+        printk("zfile: failed to load header %d \n", ret);
         goto fail_open;
     }
 
@@ -197,11 +250,11 @@ struct zfile *zfile_open(const char *path) {
 
     size_t file_size = file_len(zfile->fp);
     loff_t tailer_offset = file_size - ZF_SPACE;
-    pr_info("file_size=%lu\n", file_size);
+    pr_info("zfile: file_size=%lu\n", file_size);
     ret = file_read(zfile->fp, &zfile->header, sizeof(struct zfile_ht),
                     tailer_offset);
 
-    pr_info("Header vsize=%ld index_offset=%ld index_size=%ld verify=%d\n",
+    pr_info("zfile: Tailer vsize=%ld index_offset=%ld index_size=%ld verify=%d\n",
             zfile->header.vsize, zfile->header.index_offset,
             zfile->header.index_size, zfile->header.opt.verify);
 
@@ -211,6 +264,10 @@ struct zfile *zfile_open(const char *path) {
     jt_size = ((uint64_t)zfile->header.index_size) * sizeof(uint32_t);
     printk("get index_size %d, index_offset %d", jt_size,
            zfile->header.index_offset);
+
+    if (jt_size == 0 || jt_size > 1024UL*1024*1024) {
+        goto fail_open;
+    }
 
     jt_saved = vmalloc(jt_size);
 

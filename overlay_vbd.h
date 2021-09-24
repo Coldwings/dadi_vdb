@@ -193,10 +193,19 @@ struct ovbd_device {
         // assume block-dev size is `lsmtfile_len`
 	struct lsmt_file* fp;
  	unsigned char* path;
+
+	// struct kthread_worker	worker;
+	// struct task_struct	*worker_task;
 	// bool initialized ;
 
 };
 
+// struct ovbd_cmd {
+//         struct kthread_work work;
+//         long ret;
+//         struct kiocb iocb;
+//         struct bio_vec *bvec;
+// };
 
 /*struct file *file_open(const char *path, int flags, int rights)
 void  file_close(struct file *file)

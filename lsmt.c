@@ -94,6 +94,11 @@ struct lsmt_file *lsmt_open(struct zfile *fp) {
     loff_t pos = 0;
     struct lsmt_file *lf = NULL;
 
+    if (!fp) {
+        pr_info("LSMT: failed to open zfile\n");
+        return NULL;
+    }
+
     lf = kzalloc(sizeof(struct lsmt_file), GFP_KERNEL);
     lf->fp = fp;
 
@@ -118,6 +123,8 @@ struct lsmt_file *lsmt_open(struct zfile *fp) {
 
     ssize_t index_bytes = lf->ht.index_size * sizeof(struct segment_mapping);
     pr_info("LSMT: off: %ld, bytes: %ld\n", lf->ht.index_offset, index_bytes);
+    if (index_bytes == 0 || index_bytes > 1024UL * 1024 * 1024)
+        return NULL;
     p = vmalloc(index_bytes);
     pr_info("LSMT: loadindex off: %ld cnt: %ld into %lx\n", lf->ht.index_offset,
             index_bytes, p);
@@ -144,7 +151,6 @@ struct lsmt_file *lsmt_open(struct zfile *fp) {
     lf->index.mapping = p;
     lf->index.pbegin = p;
     lf->index.pend = p + cnt;
-    // lf->index.pend = p + lf->ht.index_size;
     return lf;
 }
 
@@ -174,7 +180,7 @@ ssize_t lsmt_read(struct lsmt_file *fp, void *buf, size_t count,
         pr_info("LSMT: %ld %lu over tail\n", offset, count);
         count = fp->ht.virtual_size - offset;
     }
-    // pr_info("LSMT: read %ld %ld\n", offset, count);
+    pr_info("LSMT: read %ld %ld\n", offset, count);
     struct segment_mapping *m = kmalloc(16 * sizeof(struct segment_mapping), GFP_KERNEL);
     struct segment_mapping s;
     s.offset = offset / SECTOR_SIZE;
@@ -184,8 +190,8 @@ ssize_t lsmt_read(struct lsmt_file *fp, void *buf, size_t count,
         for (i = 0; i < n; ++i) {
             if (s.offset < m[i].offset) {
                 // hole
-                // pr_info("LSMT: %d set %ld, %lu to 0\n", i, offset,
-                        // (m[i].offset - s.offset) * SECTOR_SIZE);
+                pr_info("LSMT: %d set %ld, %lu to 0\n", i, offset,
+                        (m[i].offset - s.offset) * SECTOR_SIZE);
                 memset(buf, 0, (m->offset - s.offset) * SECTOR_SIZE);
                 offset += (m[i].offset - s.offset) * SECTOR_SIZE;
                 buf += (m[i].offset - s.offset) * SECTOR_SIZE;
@@ -193,16 +199,16 @@ ssize_t lsmt_read(struct lsmt_file *fp, void *buf, size_t count,
             }
             // zeroe block
             if (m[i].zeroed) {
-                // pr_info("LSMT: %d set %ld, %lu to 0\n", i, offset,
-                //         m[i].length * SECTOR_SIZE);
+                pr_info("LSMT: %d set %ld, %lu to 0\n", i, offset,
+                        m[i].length * SECTOR_SIZE);
                 memset(buf, 0, m->length * SECTOR_SIZE);
                 offset += m[i].length * SECTOR_SIZE;
                 buf += m[i].length * SECTOR_SIZE;
                 ret += m[i].length * SECTOR_SIZE;
             } else {
-                // pr_info("LSMT: %d decompress copy %ld, %lu, moffset=%ld\n", i,
-                //         offset, m[i].length * SECTOR_SIZE,
-                //         m[i].moffset * SECTOR_SIZE);
+                pr_info("LSMT: %d decompress copy %ld, %lu, moffset=%ld\n", i,
+                        offset, m[i].length * SECTOR_SIZE,
+                        m[i].moffset * SECTOR_SIZE);
                 ssize_t dc = zfile_read(fp->fp, buf, m->length * SECTOR_SIZE,
                                         m->moffset * SECTOR_SIZE);
                 if (dc <= 0) {

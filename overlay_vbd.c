@@ -111,7 +111,7 @@ static int ovbd_rw_page(struct block_device *bdev, sector_t sector,
 
 static const struct block_device_operations ovbd_fops = {
 	.owner =		THIS_MODULE,
-	// .rw_page =		ovbd_rw_page,
+	.rw_page =		ovbd_rw_page,
 };
 
 /*
@@ -176,7 +176,7 @@ static struct ovbd_device *ovbd_alloc(int i)
 	disk->first_minor	= i * max_part;
 	disk->fops		= &ovbd_fops;
 	disk->private_data	= ovbd;
-	disk->flags		= GENHD_FL_EXT_DEVT;
+	disk->flags		= GENHD_FL_EXT_DEVT | GENHD_FL_NO_PART_SCAN;
 	sprintf(disk->disk_name, "vbd%d", i);
 	pr_info("vbd: disk->disk_name %s\n", disk->disk_name);
 	set_disk_ro(disk, true);
