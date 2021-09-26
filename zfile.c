@@ -10,7 +10,7 @@
 #include <linux/uio.h>
 #include <linux/vmalloc.h>
 
-#include "overlay_vbd.h"
+#include "zfile.h"
 
 static struct file *file_open(const char *path, int flags, int rights) {
     struct file *fp = NULL;

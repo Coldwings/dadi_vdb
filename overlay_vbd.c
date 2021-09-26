@@ -25,6 +25,8 @@
 #include <linux/uaccess.h>
 
 #include "overlay_vbd.h"
+#include "zfile.h"
+#include "lsmt.h"
 
 #define PAGE_SECTORS_SHIFT (PAGE_SHIFT - SECTOR_SHIFT)
 #define PAGE_SECTORS (1 << PAGE_SECTORS_SHIFT)
@@ -270,7 +272,6 @@ static struct ovbd_device *ovbd_alloc(int i) {
     disk->flags = GENHD_FL_EXT_DEVT | GENHD_FL_NO_PART_SCAN;
     sprintf(disk->disk_name, "vbd%d", i);
     pr_info("vbd: disk->disk_name %s\n", disk->disk_name);
-    set_disk_ro(disk, true);
     ovbd->fp = lsmt_open(zfile_open(backfile));
     if (!ovbd->fp) {
         pr_info("Cannot load lsmtfile\n");
@@ -289,6 +290,7 @@ static struct ovbd_device *ovbd_alloc(int i) {
     /* Tell the block layer that this is not a rotational device */
     blk_queue_flag_set(QUEUE_FLAG_NONROT, ovbd->ovbd_queue);
     blk_queue_flag_clear(QUEUE_FLAG_ADD_RANDOM, ovbd->ovbd_queue);
+    set_disk_ro(disk, true);
 
     return ovbd;
 
@@ -374,31 +376,6 @@ static int __init ovbd_init(void) {
     int i;
 
     pr_info("vbd: INIT\n");
-
-    // struct lsmt_file *fp = NULL;
-    // pr_info("vbd: before open file\n");
-    // fp = lsmt_open(zfile_open(backfile));
-    // if (!fp) {
-    // 	pr_info("Cannot load lsmtfile\n");
-    // 	return -EIO;
-    // }
-    // char buffer[4096];
-    // loff_t off;
-    // size_t cnt;
-    // size_t flen = lsmt_len(fp);
-    // struct file* fout = file_open("/root/dadi_vdb/output", O_RDWR | O_CREAT |
-    // O_TRUNC, 0644); for (off = 0; off<flen; off += 4096) { 	cnt = flen - off
-    // >
-    // 4096 ? 4096 : flen - off; 	lsmt_read(fp, buffer, cnt, off);
-    // loff_t woff = off; 	kernel_write(fout, buffer, cnt, &woff);
-    // }
-    // file_close(fout);
-
-    // pr_info("vbd: after open file fp = %lx\n", fp);
-    // lsmt_close(fp);
-    // pr_info("vbd: after close file fp = %lx\n", fp);
-
-    // return 0;
 
     if (register_blkdev(OVBD_MAJOR, "ovbd")) return -EIO;
 

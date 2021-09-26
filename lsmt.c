@@ -6,9 +6,11 @@
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
 
-#include "overlay_vbd.h"
+#include "lsmt.h"
+#include "zfile.h"
 
 #define SECTOR_SIZE 512UL
+static const uint64_t INVALID_OFFSET = (1UL << 50) - 1;
 
 static uint64_t segment_end(const struct segment_mapping *s) {
     return s->offset + s->length;
