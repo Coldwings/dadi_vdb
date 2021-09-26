@@ -117,7 +117,6 @@ static int ovbd_read_simple(struct ovbd_device *ovbd, struct request *rq,
         len = ovbd_do_bvec(ovbd, bvec.bv_page, READ, bvec.bv_offset,
                            bvec.bv_len, pos);
         if (len < 0) return len;
-        pos += len;
 
         if (len != bvec.bv_len) {
             struct bio *bio;
@@ -126,6 +125,7 @@ static int ovbd_read_simple(struct ovbd_device *ovbd, struct request *rq,
             break;
         }
         cond_resched();
+        pos += PAGE_SIZE;
     }
 
     return 0;
@@ -258,8 +258,8 @@ static struct ovbd_device *ovbd_alloc(int i) {
      *  is harmless)
      */
     blk_queue_physical_block_size(ovbd->ovbd_queue, PAGE_SIZE);
-	blk_queue_logical_block_size(ovbd->ovbd_queue, PAGE_SIZE);
-    blk_queue_io_min(ovbd->ovbd_queue, PAGE_SIZE);
+	// blk_queue_logical_block_size(ovbd->ovbd_queue, PAGE_SIZE);
+    // blk_queue_io_min(ovbd->ovbd_queue, PAGE_SIZE);
 
     disk = ovbd->ovbd_disk = alloc_disk(max_part);
     if (!disk) goto out_free_queue;
