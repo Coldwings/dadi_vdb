@@ -134,7 +134,6 @@ static int ovbd_read_simple(struct ovbd_device *ovbd, struct request *rq,
 }
 
 static int do_req_filebacked(struct ovbd_device *lo, struct request *rq) {
-    struct ovbd_cmd *cmd = blk_mq_rq_to_pdu(rq);
     loff_t pos = ((loff_t)blk_rq_pos(rq) << 9);
 
     /*
@@ -212,7 +211,6 @@ static void ovbd_complete_rq(struct request *rq) {
     blk_status_t ret = BLK_STS_OK;
 
     if (cmd->ret < 0) ret = errno_to_blk_status(cmd->ret);
-end_io:
     blk_mq_end_request(rq, ret);
 }
 
@@ -228,6 +226,7 @@ static struct ovbd_device *ovbd_alloc(int i) {
     struct ovbd_device *ovbd;
     struct gendisk *disk;
     int err;
+    size_t flen;
 
     ovbd = kzalloc(sizeof(*ovbd), GFP_KERNEL);
     if (!ovbd) goto out;
@@ -277,12 +276,12 @@ static struct ovbd_device *ovbd_alloc(int i) {
         pr_info("Cannot load lsmtfile\n");
         goto out_free_queue;
     }
-    int error = ovbd_prepare_queue(ovbd, i);
-    if (error) goto out_free_queue;
+    err = ovbd_prepare_queue(ovbd, i);
+    if (err) goto out_free_queue;
 
     // 此处为loop形式，文件长度即blockdev的大小
     // 如果是LSMTFile，则应以LSMTFile头记录的长度为准
-    size_t flen = lsmt_len(ovbd->fp);
+    flen = lsmt_len(ovbd->fp);
     ovbd->block_size = flen >> SECTOR_SHIFT;
     set_capacity(disk, flen >> SECTOR_SHIFT);
     ovbd->ovbd_queue->backing_dev_info->capabilities |= BDI_CAP_SYNCHRONOUS_IO;
@@ -406,9 +405,6 @@ static int __init ovbd_init(void) {
                         ovbd_probe, NULL, NULL);
 
     pr_info("ovbd: module loaded\n");
-
-    struct ovbd_device *backed_ovbd = list_first_entry_or_null(
-        &ovbd->ovbd_list, struct ovbd_device, ovbd_list);
 
     return 0;
 
