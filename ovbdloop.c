@@ -155,9 +155,9 @@ static int ov_read_simple(struct ovbd_device *lo, struct request *rq,
         len = lsmt_read(ovbd->fp, mem + bvec.bv_offset, bvec.bv_len, pos);
         kunmap_atomic(mem);
 
-        if (len < 0) return len;
-
-        flush_dcache_page(bvec.bv_page);
+        if (len < bvec.bv_len) {
+            return len;
+        }
 
         if (len != bvec.bv_len) {
             struct bio *bio;
@@ -165,7 +165,9 @@ static int ov_read_simple(struct ovbd_device *lo, struct request *rq,
             __rq_for_each_bio(bio, rq) zero_fill_bio(bio);
             break;
         }
+        flush_dcache_page(bvec.bv_page);
         cond_resched();
+        pos += bvec.bv_len;
     }
 
     return 0;

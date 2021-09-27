@@ -100,7 +100,7 @@ static int ovbd_read_simple(struct ovbd_device *ovbd, struct request *rq,
         kunmap_atomic(mem);
 
         if (len < bvec.bv_len) {
-            return -EIO;
+            return len;
         }
 
         if (len != bvec.bv_len) {
@@ -111,7 +111,7 @@ static int ovbd_read_simple(struct ovbd_device *ovbd, struct request *rq,
         }
         flush_dcache_page(bvec.bv_page);
         cond_resched();
-        pos += PAGE_SIZE;
+        pos += bvec.bv_len;
     }
 
     return 0;
@@ -119,7 +119,6 @@ static int ovbd_read_simple(struct ovbd_device *ovbd, struct request *rq,
 
 static int do_req_filebacked(struct ovbd_device *lo, struct request *rq) {
     loff_t pos;
-    pr_info("OVBD: sector=%llu op=%d\n", blk_rq_pos(rq), req_op(rq));
     pos = ((loff_t)blk_rq_pos(rq) << 9);
 
     /*
