@@ -109,7 +109,7 @@ struct lsmt_file *lsmt_open(struct zfile *fp) {
         return NULL;
     }
 
-    lf = kzalloc(sizeof(struct lsmt_file), GFP_KERNEL);
+    lf = kzalloc(sizeof(struct lsmt_file), GFP_NOIO);
     lf->fp = fp;
 
     file_size = zfile_len(fp);
@@ -190,7 +190,7 @@ ssize_t lsmt_read(struct lsmt_file *fp, void *buf, size_t count,
         count = fp->ht.virtual_size - offset;
     }
     // pr_info("LSMT: read %ld %ld\n", offset, count);
-    m = kmalloc(16 * sizeof(struct segment_mapping), GFP_KERNEL);
+    m = kmalloc(16 * sizeof(struct segment_mapping), GFP_NOIO);
     s.offset = offset / SECTOR_SIZE;
     s.length = count / SECTOR_SIZE;
     while (true) {

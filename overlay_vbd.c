@@ -24,37 +24,15 @@
 #include <linux/slab.h>
 #include <linux/uaccess.h>
 
-#include "overlay_vbd.h"
-#include "zfile.h"
 #include "lsmt.h"
+#include "zfile.h"
+#include "overlay_vbd.h"
+
 
 #define PAGE_SECTORS_SHIFT (PAGE_SHIFT - SECTOR_SHIFT)
 #define PAGE_SECTORS (1 << PAGE_SECTORS_SHIFT)
 #define OVBD_MAJOR 231
 #define OVBD_CACHE_SIZE 536870912000
-
-/*
- * Process a single bvec of a bio.
- */
-static int ovbd_do_bvec(struct ovbd_device *ovbd, struct page *page,
-                        unsigned int op, loff_t lof, loff_t size,
-                        loff_t offset) {
-    void *mem;
-    ssize_t ret = 0;
-
-    if (op_is_write(op)) {
-        ret = -ENOTSUPP;
-        goto out;
-    }
-    mem = kmap_atomic(page);
-    ret = lsmt_read(ovbd->fp, mem + lof, size, (offset & PAGE_MASK) + lof);
-    // pr_info("vbd: dobvec ret %d\n", ret);
-    flush_dcache_page(page);
-    kunmap_atomic(mem);
-
-out:
-    return ret;
-}
 
 static const struct block_device_operations ovbd_fops = {
     .owner = THIS_MODULE,
@@ -114,11 +92,16 @@ static int ovbd_read_simple(struct ovbd_device *ovbd, struct request *rq,
     struct bio_vec bvec;
     struct req_iterator iter;
     ssize_t len;
+    void *mem;
 
     rq_for_each_segment(bvec, rq, iter) {
-        len = ovbd_do_bvec(ovbd, bvec.bv_page, READ, bvec.bv_offset,
-                           bvec.bv_len, pos);
-        if (len < 0) return len;
+        mem = kmap_atomic(bvec.bv_page);
+        len = lsmt_read(ovbd->fp, mem + bvec.bv_offset, bvec.bv_len, pos);
+        kunmap_atomic(mem);
+
+        if (len < bvec.bv_len) {
+            return -EIO;
+        }
 
         if (len != bvec.bv_len) {
             struct bio *bio;
@@ -126,6 +109,7 @@ static int ovbd_read_simple(struct ovbd_device *ovbd, struct request *rq,
             __rq_for_each_bio(bio, rq) zero_fill_bio(bio);
             break;
         }
+        flush_dcache_page(bvec.bv_page);
         cond_resched();
         pos += PAGE_SIZE;
     }
@@ -134,7 +118,9 @@ static int ovbd_read_simple(struct ovbd_device *ovbd, struct request *rq,
 }
 
 static int do_req_filebacked(struct ovbd_device *lo, struct request *rq) {
-    loff_t pos = ((loff_t)blk_rq_pos(rq) << 9);
+    loff_t pos;
+    pr_info("OVBD: sector=%llu op=%d\n", blk_rq_pos(rq), req_op(rq));
+    pos = ((loff_t)blk_rq_pos(rq) << 9);
 
     /*
      * lo_write_simple and lo_read_simple should have been covered
@@ -259,7 +245,7 @@ static struct ovbd_device *ovbd_alloc(int i) {
      *  is harmless)
      */
     blk_queue_physical_block_size(ovbd->ovbd_queue, PAGE_SIZE);
-	// blk_queue_logical_block_size(ovbd->ovbd_queue, PAGE_SIZE);
+    // blk_queue_logical_block_size(ovbd->ovbd_queue, PAGE_SIZE);
     // blk_queue_io_min(ovbd->ovbd_queue, PAGE_SIZE);
 
     disk = ovbd->ovbd_disk = alloc_disk(max_part);

@@ -109,8 +109,8 @@ ssize_t zfile_read(struct zfile *zf, void *dst, size_t count, loff_t offset) {
     begin = zf->jump[start_idx].partial_offset;
     range = zf->jump[end_idx].partial_offset + zf->jump[end_idx].delta - begin;
 
-    src_buf = kmalloc(range, GFP_KERNEL);
-    decomp_buf = kmalloc(4096, GFP_KERNEL);
+    src_buf = kmalloc(range, GFP_NOIO);
+    decomp_buf = kmalloc(4096, GFP_NOIO);
 
     // pr_info("zfile: before read file %ld %lu\n", begin, range);
     // read compressed data

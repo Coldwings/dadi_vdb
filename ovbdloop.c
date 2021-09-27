@@ -152,8 +152,7 @@ static int ov_read_simple(struct ovbd_device *lo, struct request *rq,
 
     rq_for_each_segment(bvec, rq, iter) {
         mem = kmap_atomic(bvec.bv_page);
-        len = lsmt_read(lo->ov_backing_file, mem + bvec.bv_offset, bvec.bv_len,
-                        (offset & PAGE_MASK) + bvec.bv_offset);
+        len = lsmt_read(ovbd->fp, mem + bvec.bv_offset, bvec.bv_len, pos);
         kunmap_atomic(mem);
 
         if (len < 0) return len;
