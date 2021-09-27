@@ -8,8 +8,6 @@
 
 struct zfile;
 
-static const uint32_t HT_SPACE = 4096;
-
 struct lsmt_ht {
   uint64_t magic0;
   uuid_t magic1;
@@ -50,5 +48,8 @@ struct lsmt_file* lsmt_open(struct zfile* zf);
 ssize_t lsmt_read(struct lsmt_file* fp, void* buff, size_t count, loff_t offset);
 size_t lsmt_len(struct lsmt_file *fp);
 void lsmt_close(struct lsmt_file *fp);
+struct path lsmt_getpath(struct lsmt_file* file);
+struct file* lsmt_getfile(struct lsmt_file* file);
+bool is_lsmtfile(struct zfile* zf);
 
 #endif

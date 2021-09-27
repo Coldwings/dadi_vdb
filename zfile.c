@@ -12,6 +12,10 @@
 
 #include "zfile.h"
 
+static const uint32_t ZF_SPACE = 512;
+static uint64_t *MAGIC0 = (uint64_t *)"ZFile\0\1";
+static const uuid_t MAGIC1 = UUID_INIT(0x74756a69, 0x2e79, 0x7966, 0x40, 0x41,
+                                       0x6c, 0x69, 0x62, 0x61, 0x62, 0x61);
 static struct file *file_open(const char *path, int flags, int rights) {
     struct file *fp = NULL;
     fp = filp_open(path, O_RDONLY, 0);
@@ -35,7 +39,6 @@ static ssize_t file_read(struct file *file, void *buf, size_t count,
     // struct kvec iov;
     // struct iov_iter iter;
     loff_t lpos;
-    size_t lcnt;
     size_t flen = file_len(file);
     // pr_info("zfile: Trying to read underlay file %ld %lu\n", pos, count);
     if (pos > flen) return 0;
@@ -64,13 +67,24 @@ static ssize_t file_read(struct file *file, void *buf, size_t count,
 
 size_t zfile_len(struct zfile *zfile) { return zfile->header.vsize; }
 
+struct path zfile_getpath(struct zfile *zfile) {
+    return zfile->fp->f_path;
+}
+
 ssize_t zfile_read(struct zfile *zf, void *dst, size_t count, loff_t offset) {
     size_t start_idx, end_idx;
-    loff_t begin, range, filloff;
+    loff_t begin, range;
     size_t bs;
     ssize_t ret;
     int dc;
     ssize_t i;
+    unsigned char *src_buf;
+    unsigned char *decomp_buf;
+    loff_t decomp_offset;
+    unsigned char *c_buf;
+    loff_t poff;
+    size_t pcnt;
+
     // pr_info("zfile: read off=%ld cnt=%lu\n", offset, count);
     if (!zf) {
         // pr_info("zfile: failed empty zf\n");
@@ -95,25 +109,23 @@ ssize_t zfile_read(struct zfile *zf, void *dst, size_t count, loff_t offset) {
     begin = zf->jump[start_idx].partial_offset;
     range = zf->jump[end_idx].partial_offset + zf->jump[end_idx].delta - begin;
 
-    unsigned char *src_buf;
     src_buf = kmalloc(range, GFP_KERNEL);
-    unsigned char *decomp_buf;
     decomp_buf = kmalloc(4096, GFP_KERNEL);
 
     // pr_info("zfile: before read file %ld %lu\n", begin, range);
     // read compressed data
     ret = file_read(zf->fp, src_buf, range, begin);
     if (ret != range) {
-        pr_info("zfile: Read file failed, %d != %d\n", ret, range);
+        pr_info("zfile: Read file failed, %ld != %lld\n", ret, range);
         ret = -EIO;
         goto fail_read;
     }
     // pr_info("zfile: after read file %ld\n", ret);
 
-    unsigned char *c_buf = src_buf;
+    c_buf = src_buf;
 
     // decompress in seq
-    loff_t decomp_offset = offset - offset % bs;
+    decomp_offset = offset - offset % bs;
     ret = 0;
     for (i = start_idx; i <= end_idx; i++) {
         // pr_info("zfile: before decompress %ld [%lu %lu]\n", i, start_idx,
@@ -128,8 +140,8 @@ ssize_t zfile_read(struct zfile *zf, void *dst, size_t count, loff_t offset) {
             ret = -EIO;
             goto fail_read;
         }
-        loff_t poff = offset - decomp_offset;
-        size_t pcnt = count > (dc - poff) ? (dc - poff) : count;
+        poff = offset - decomp_offset;
+        pcnt = count > (dc - poff) ? (dc - poff) : count;
         // pr_info(
         //     "zfile: decompress %d block, offset=%ld decomp_offset=%ld cut "
         //     "poff=%ld pcnt=%lu\n",
@@ -162,7 +174,7 @@ void build_jump_table(uint32_t *jt_saved, struct zfile *zf) {
 }
 
 void zfile_close(struct zfile *zfile) {
-    pr_info("zfile: close %lx\n", zfile);
+    pr_info("zfile: close\n");
     if (zfile) {
         if (zfile->jump) {
             vfree(zfile->jump);
@@ -176,50 +188,42 @@ void zfile_close(struct zfile *zfile) {
     }
 }
 
-struct zfile *zfile_open(const char *path) {
-    unsigned int i;
+struct zfile *zfile_open_by_file(struct file *file) {
     uint32_t *jt_saved;
     size_t jt_size = 0;
     struct zfile *zfile = NULL;
-    loff_t pos = 0;
     int ret = 0;
+    size_t file_size = 0;
+    loff_t tailer_offset;
+
+    if (!is_zfile(file)) return NULL;
 
     zfile = kzalloc(sizeof(struct zfile), GFP_KERNEL);
     if (!zfile) {
         goto fail_alloc;
     }
 
-    zfile->fp = file_open(path, 0, 644);
-    if (!zfile->fp) {
-        printk("zfile: Canot open zfile %s\n", path);
-        goto fail_open;
-    }
-
-    ret = file_read(zfile->fp, &zfile->header, sizeof(struct zfile_ht), 0);
-
-    if (ret < (ssize_t)sizeof(struct zfile_ht)) {
-        printk("zfile: failed to load header %d \n", ret);
-        goto fail_open;
-    }
+    zfile->fp = file;
 
     // should verify header
 
-    size_t file_size = file_len(zfile->fp);
-    loff_t tailer_offset = file_size - ZF_SPACE;
+    file_size = file_len(zfile->fp);
+    tailer_offset = file_size - ZF_SPACE;
     pr_info("zfile: file_size=%lu\n", file_size);
     ret = file_read(zfile->fp, &zfile->header, sizeof(struct zfile_ht),
                     tailer_offset);
 
     pr_info(
-        "zfile: Tailer vsize=%ld index_offset=%ld index_size=%ld verify=%d\n",
+        "zfile: Tailer vsize=%lld index_offset=%lld index_size=%lld "
+        "verify=%d\n",
         zfile->header.vsize, zfile->header.index_offset,
         zfile->header.index_size, zfile->header.opt.verify);
 
-    pr_info("zfile: vlen=%ld size=%ld\n", zfile->header.vsize,
+    pr_info("zfile: vlen=%lld size=%ld\n", zfile->header.vsize,
             zfile_len(zfile));
 
     jt_size = ((uint64_t)zfile->header.index_size) * sizeof(uint32_t);
-    printk("get index_size %d, index_offset %d", jt_size,
+    printk("get index_size %lu, index_offset %llu", jt_size,
            zfile->header.index_offset);
 
     if (jt_size == 0 || jt_size > 1024UL * 1024 * 1024) {
@@ -240,4 +244,38 @@ fail_open:
     zfile_close(zfile);
 fail_alloc:
     return NULL;
+}
+
+struct zfile *zfile_open(const char *path) {
+    struct zfile *ret = NULL;
+    struct file *file = file_open(path, 0, 644);
+    if (!file) {
+        pr_info("zfile: Canot open zfile %s\n", path);
+        return NULL;
+    }
+    ret = zfile_open_by_file(file);
+    if (!ret) {
+        file_close(file);
+    }
+    return ret;
+}
+
+struct file *zfile_getfile(struct zfile *zfile) {
+    return zfile->fp;
+}
+
+bool is_zfile(struct file *file) {
+    struct zfile_ht ht;
+    ssize_t ret;
+
+    if (!file) return false;
+
+    ret = file_read(file, &ht, sizeof(struct zfile_ht), 0);
+
+    if (ret < (ssize_t)sizeof(struct zfile_ht)) {
+        pr_info("zfile: failed to load header %ld \n", ret);
+        return false;
+    }
+
+    return ht.magic0 == *MAGIC0 && uuid_equal(&ht.magic1, &MAGIC1);
 }
