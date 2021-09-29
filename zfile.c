@@ -1,19 +1,23 @@
-#include <linux/fs.h>
+#include "zfile.h"
+
 #include <linux/buffer_head.h>
 #include <linux/errno.h>
+#include <linux/fadvise.h>
+#include <linux/fs.h>
+#include <linux/kallsyms.h>
 #include <linux/lz4.h>
 #include <linux/mm.h>
 #include <linux/mman.h>
 #include <linux/slab.h>
+#include <linux/uaccess.h>
 #include <linux/uio.h>
 #include <linux/vmalloc.h>
-
-#include "zfile.h"
 
 static const uint32_t ZF_SPACE = 512;
 static uint64_t *MAGIC0 = (uint64_t *)"ZFile\0\1";
 static const uuid_t MAGIC1 = UUID_INIT(0x74756a69, 0x2e79, 0x7966, 0x40, 0x41,
                                        0x6c, 0x69, 0x62, 0x61, 0x62, 0x61);
+
 static struct file *file_open(const char *path, int flags, int rights) {
     struct file *fp = NULL;
     fp = filp_open(path, O_RDONLY, 0);
@@ -21,6 +25,7 @@ static struct file *file_open(const char *path, int flags, int rights) {
         printk("Cannot open the file %ld\n", PTR_ERR(fp));
         return NULL;
     }
+    vfs_fadvise(fp, 0, fp->f_inode->i_size, POSIX_FADV_RANDOM);
     printk("Opened the file %s", path);
     return fp;
 }
@@ -38,6 +43,7 @@ static ssize_t file_read(struct file *file, void *buf, size_t count,
     size_t flen = file_len(file);
     if (pos > flen) return 0;
     if (pos + count > flen) count = flen - pos;
+    vfs_fadvise(file, pos, count, POSIX_FADV_SEQUENTIAL);
     while (count > 0) {
         lpos = pos;
         ret = kernel_read(file, buf, count, &lpos);
@@ -53,7 +59,6 @@ static ssize_t file_read(struct file *file, void *buf, size_t count,
         sret += (lpos - pos);
         pos = lpos;
     }
-
     return sret;
 }
 
@@ -86,7 +91,8 @@ ssize_t zfile_read(struct zfile *zf, void *dst, size_t count, loff_t offset) {
     if (count == 0) return 0;
     // read from over-tail
     if (offset > zf->header.vsize) {
-        pr_info("zfile: read over tail %lld > %lld\n", offset, zf->header.vsize);
+        pr_info("zfile: read over tail %lld > %lld\n", offset,
+                zf->header.vsize);
         return 0;
     }
     // read till tail
@@ -135,6 +141,10 @@ ssize_t zfile_read(struct zfile *zf, void *dst, size_t count, loff_t offset) {
         offset = decomp_offset;
         c_buf += zf->jump[i].delta;
     }
+
+    // invalid caches
+    invalidate_mapping_pages(zf->fp->f_mapping, begin >> PAGE_SHIFT,
+                             ((begin + range) >> PAGE_SHIFT) - 1);
 
 fail_read:
     kfree(decomp_buf);
